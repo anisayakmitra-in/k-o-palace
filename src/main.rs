@@ -141,7 +141,7 @@ async fn main() {
     let app = Router::new()
         .route("/health", get(health))
         .route("/api/v1/packages", get(list_packages).post(publish_package))
-        .route("/api/v1/packages/:id", get(get_package))
+        .route("/api/v1/packages/{id}", get(get_package))
         .route("/api/v1/search", get(search_packages))
         .route("/api/v1/categories", get(get_categories))
         .route("/api/v1/featured", get(get_featured))
@@ -151,7 +151,7 @@ async fn main() {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr = "0.0.0.0:3000";
+    let addr = "0.0.0.0:3001";
     println!("K-O Palace listening on http://{addr}");
     println!("  API:    http://{addr}/api/v1/packages");
     println!("  Health: http://{addr}/health");

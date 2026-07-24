@@ -124,10 +124,10 @@ cargo build --release
 ./target/release/k-o-palace
 
 # API
-curl http://localhost:3000/api/v1/packages
-curl http://localhost:3000/api/v1/search?q=browser
-curl http://localhost:3000/api/v1/featured
-curl http://localhost:3000/api/v1/trending
+curl http://localhost:3001/api/v1/packages
+curl http://localhost:3001/api/v1/search?q=browser
+curl http://localhost:3001/api/v1/featured
+curl http://localhost:3001/api/v1/trending
 ```
 
 ## API Endpoints
