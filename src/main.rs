@@ -139,6 +139,7 @@ async fn main() {
         .route("/api/v1/featured", get(get_featured))
         .route("/api/v1/trending", get(get_trending))
         .route("/api/v1/newest", get(get_newest))
+        .route("/api/v1/runtimes", get(get_runtimes))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -150,4 +151,9 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+async fn get_runtimes(State(state): State<Arc<RwLock<AppState>>>) -> Json<Vec<String>> {
+    let state = state.read().await;
+    Json(state.store.runtimes())
 }

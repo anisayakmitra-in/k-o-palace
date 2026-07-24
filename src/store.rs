@@ -23,7 +23,12 @@ impl PackageStore {
             pkgs.retain(|p| p.kind.as_str() == kind);
         }
 
-        // Filter by tag/category
+        // Filter by runtime
+        if let Some(rt) = &params.runtime {
+            pkgs.retain(|p| p.compatibility.runtimes.iter().any(|r| r.contains(rt)));
+        }
+
+        // Filter by tag
         if let Some(cat) = &params.category {
             pkgs.retain(|p| p.tags.iter().any(|t| t == cat));
         }
@@ -318,5 +323,16 @@ impl PackageStore {
         for pkg in samples {
             self.packages.insert(pkg.id.clone(), pkg);
         }
+    }
+
+    pub fn runtimes(&self) -> Vec<String> {
+        let mut runtimes: Vec<String> = self
+            .packages
+            .values()
+            .flat_map(|p| p.compatibility.runtimes.clone())
+            .collect();
+        runtimes.sort();
+        runtimes.dedup();
+        runtimes
     }
 }

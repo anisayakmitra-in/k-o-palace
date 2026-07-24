@@ -129,6 +129,7 @@ pub struct ListParams {
     pub q: Option<String>,
     pub kind: Option<String>,
     pub category: Option<String>,
+    pub runtime: Option<String>,
     pub limit: Option<usize>,
     pub offset: Option<usize>,
 }
