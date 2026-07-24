@@ -2,7 +2,7 @@
 
 > Open AI Runtime Registry — the sovereign ecosystem for discovering, validating, signing, versioning, evolving, and distributing AI runtime components.
 
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache 2.0-yellow.svg)](https://opensource.org/licenses/Apache 2.0)
 [![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org/)
 
 ## What is K-O Palace?
@@ -177,4 +177,4 @@ GET    /health                             Health check
 
 ## License
 
-MIT — The KUBER Manifest Specification is open source. Anyone may implement it.
+Apache 2.0 — The KUBER Manifest Specification is open source. Anyone may implement it.

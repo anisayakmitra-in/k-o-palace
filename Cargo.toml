@@ -3,7 +3,7 @@ name = "k-o-palace"
 version = "0.1.0"
 edition = "2021"
 description = "Open AI Runtime Registry — the sovereign ecosystem for discovering, validating, signing, versioning, evolving, and distributing AI runtime components."
-license = "MIT"
+license = "Apache-2.0"
 publish = false
 
 [dependencies]
