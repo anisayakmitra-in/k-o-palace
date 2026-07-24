@@ -136,7 +136,11 @@ impl PackageStore {
                     publisher: "openpandora".into(),
                 },
                 capabilities: CapabilityInfo {
-                    provides: vec!["browser.open".into(), "browser.click".into(), "browser.extract".into()],
+                    provides: vec![
+                        "browser.open".into(),
+                        "browser.click".into(),
+                        "browser.extract".into(),
+                    ],
                     requires: vec![],
                 },
                 downloads: 15420,
@@ -226,7 +230,11 @@ impl PackageStore {
                     publisher: "modelcontextprotocol".into(),
                 },
                 capabilities: CapabilityInfo {
-                    provides: vec!["github.repos".into(), "github.issues".into(), "github.pulls".into()],
+                    provides: vec![
+                        "github.repos".into(),
+                        "github.issues".into(),
+                        "github.pulls".into(),
+                    ],
                     requires: vec![],
                 },
                 downloads: 45200,
@@ -246,7 +254,9 @@ impl PackageStore {
                 name: "Rust Coding Pack".into(),
                 version: "0.5.0".into(),
                 kind: PackageKind::CapabilityPack,
-                description: "Complete Rust development pack — shell, filesystem, git, cargo, rust-analyzer".into(),
+                description:
+                    "Complete Rust development pack — shell, filesystem, git, cargo, rust-analyzer"
+                        .into(),
                 author: "openpandora".into(),
                 license: "MIT".into(),
                 trust: TrustInfo {
@@ -276,7 +286,9 @@ impl PackageStore {
                 name: "Research Edition".into(),
                 version: "0.1.0".into(),
                 kind: PackageKind::Distribution,
-                description: "Complete Pandora distribution for research — search, scrape, analyze, cite".into(),
+                description:
+                    "Complete Pandora distribution for research — search, scrape, analyze, cite"
+                        .into(),
                 author: "openpandora".into(),
                 license: "MIT".into(),
                 trust: TrustInfo {

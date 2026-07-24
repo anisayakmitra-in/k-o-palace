@@ -16,11 +16,11 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
-mod types;
 mod store;
+mod types;
 
-use types::*;
 use store::PackageStore;
+use types::*;
 
 // ── App State ──
 
@@ -66,9 +66,7 @@ async fn search_packages(
     })
 }
 
-async fn get_featured(
-    State(state): State<Arc<RwLock<AppState>>>,
-) -> Json<PackageListResponse> {
+async fn get_featured(State(state): State<Arc<RwLock<AppState>>>) -> Json<PackageListResponse> {
     let state = state.read().await;
     let packages = state.store.featured();
     Json(PackageListResponse {
@@ -77,9 +75,7 @@ async fn get_featured(
     })
 }
 
-async fn get_trending(
-    State(state): State<Arc<RwLock<AppState>>>,
-) -> Json<PackageListResponse> {
+async fn get_trending(State(state): State<Arc<RwLock<AppState>>>) -> Json<PackageListResponse> {
     let state = state.read().await;
     let packages = state.store.trending();
     Json(PackageListResponse {
@@ -88,9 +84,7 @@ async fn get_trending(
     })
 }
 
-async fn get_newest(
-    State(state): State<Arc<RwLock<AppState>>>,
-) -> Json<PackageListResponse> {
+async fn get_newest(State(state): State<Arc<RwLock<AppState>>>) -> Json<PackageListResponse> {
     let state = state.read().await;
     let packages = state.store.newest();
     Json(PackageListResponse {
@@ -99,9 +93,7 @@ async fn get_newest(
     })
 }
 
-async fn get_categories(
-    State(state): State<Arc<RwLock<AppState>>>,
-) -> Json<Vec<String>> {
+async fn get_categories(State(state): State<Arc<RwLock<AppState>>>) -> Json<Vec<String>> {
     let state = state.read().await;
     Json(state.store.categories())
 }
