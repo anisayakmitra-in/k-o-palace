@@ -1,0 +1,20 @@
+[package]
+name = "k-o-palace"
+version = "0.1.0"
+edition = "2021"
+description = "Open AI Runtime Registry — the sovereign ecosystem for discovering, validating, signing, versioning, evolving, and distributing AI runtime components."
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+sha2 = "0.10"
