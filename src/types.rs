@@ -19,6 +19,8 @@ pub struct Package {
     pub success_rate: f64,
     pub compatibility: CompatibilityInfo,
     pub repository: Option<String>,
+    #[serde(default)]
+    pub artifact_url: Option<String>,
     pub homepage: Option<String>,
     pub tags: Vec<String>,
     pub created_at: DateTime<Utc>,
@@ -30,6 +32,8 @@ pub struct Package {
 pub struct TrustInfo {
     pub level: TrustLevel,
     pub signature: Option<String>,
+    #[serde(default)]
+    pub public_key: Option<String>,
     pub content_hash: Option<String>,
     pub publisher: String,
 }

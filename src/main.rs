@@ -9,6 +9,7 @@
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
+    response::Redirect,
     routing::get,
     Json, Router,
 };
@@ -110,6 +111,21 @@ async fn publish_package(
         .map_err(|e| (StatusCode::BAD_REQUEST, e))
 }
 
+async fn download_package(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Path(id): Path<String>,
+) -> Result<Redirect, (StatusCode, String)> {
+    let state = state.read().await;
+    let package = state
+        .store
+        .get(&id)
+        .ok_or((StatusCode::NOT_FOUND, format!("Package '{}' not found", id)))?;
+    let artifact_url = package.artifact_url.ok_or((
+        StatusCode::NOT_FOUND,
+        format!("Package '{}' has no published artifact", id),
+    ))?;
+    Ok(Redirect::temporary(&artifact_url))
+}
 async fn health() -> &'static str {
     "ok"
 }
@@ -134,6 +150,7 @@ async fn main() {
         .route("/health", get(health))
         .route("/api/v1/packages", get(list_packages).post(publish_package))
         .route("/api/v1/packages/{id}", get(get_package))
+        .route("/api/v1/packages/{id}/download", get(download_package))
         .route("/api/v1/search", get(search_packages))
         .route("/api/v1/categories", get(get_categories))
         .route("/api/v1/featured", get(get_featured))

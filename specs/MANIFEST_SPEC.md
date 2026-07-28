@@ -58,7 +58,8 @@ kind = "gene"
 
 [package.trust]
 level = "verified"          # experimental | community | verified | official | enterprise | certified
-signature = "ed25519:..."   # Ed25519 signature of content hash
+signature = "base64:..."      # Ed25519 signature of package identity and content hash
+public_key = "base64:..."   # Publisher Ed25519 public key
 content_hash = "sha256:..." # SHA256 of the package tarball
 publisher = "openpandora"
 min_runtime_version = "0.2"
