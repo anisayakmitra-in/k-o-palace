@@ -385,9 +385,14 @@ async fn authenticate_header(
     state: &Arc<AppState>,
     headers: &axum::http::HeaderMap,
 ) -> PalaceResult<AuthContext> {
-    let auth = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok());
+    let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+    let auth = values.next().and_then(|value| value.to_str().ok());
+    if values.next().is_some() {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Unauthorized,
+            "multiple authorization headers are not allowed",
+        ));
+    }
     authenticate(&state.repo, auth).await
 }
 

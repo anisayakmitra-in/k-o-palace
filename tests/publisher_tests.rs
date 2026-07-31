@@ -325,3 +325,24 @@ async fn public_publisher_response_omits_registration_email() {
     let publisher: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert!(publisher.get("email").is_none());
 }
+
+#[tokio::test]
+async fn duplicate_authorization_headers_are_rejected() {
+    let state = test_state();
+    let (_, token) =
+        k_o_palace::auth::register_publisher(&state.repo, "dupeauth", "Dupe Auth", None, None)
+            .await
+            .unwrap();
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/tokens")
+                .header("authorization", format!("Bearer {token}"))
+                .header("authorization", "Bearer invalid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
