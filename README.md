@@ -2,179 +2,207 @@
 
 > Open AI Runtime Registry — the sovereign ecosystem for discovering, validating, signing, versioning, evolving, and distributing AI runtime components.
 
-[![License: Apache 2.0](https://img.shields.io/badge/License-Apache 2.0-yellow.svg)](https://opensource.org/licenses/Apache 2.0)
-[![Rust](https://img.shields.io/badge/Rust-1.75+-orange.svg)](https://www.rust-lang.org/)
+K-O Palace is a runtime-agnostic AI package registry that implements the KUBER manifest specification. It provides secure package publishing, trust-level verification, Ed25519 signature validation, content-hash verification, and artifact storage with allowlist enforcement.
 
-## What is K-O Palace?
+## Current Functionality
 
-K-O Palace is an **open marketplace and registry for AI development tools**. It's not just Pandora's package manager — it's a runtime-agnostic ecosystem where any AI runtime, coding agent, or tool can publish and consume packages.
+- **Registry API** with 17 endpoints under `/api/v1`
+- **Manifest validation** for `kuber.toml` (package ID, semver, kind, author, license, compatibility, capabilities, URLs, trust metadata)
+- **Authentication** with hashed API tokens, publisher ownership, and role-based access (publisher, maintainer, moderator, administrator)
+- **Trust levels** with explicit server-enforced transitions (Experimental → Community → Verified → Official → Enterprise → Certified)
+- **Ed25519 signature verification** and SHA-256 content-hash verification
+- **Artifact storage** with local filesystem and GitHub Release backends, HTTPS enforcement, host allowlist, redirect limits, and checksum verification
+- **Pagination** with bounded limits and accurate total counts
+- **Search** with ranked relevance scoring
+- **Structured errors** with stable error codes
+- **CORS** configured from explicit origins (not permissive)
+- **Request body limits** and **request timeouts**
+- **Structured tracing** via `tracing` / `tracing-subscriber`
+- **In-memory backend** for tests; **PostgreSQL backend** via SQLx for production
 
-Think of it as:
-- **crates.io** (packages) +
-- **Hugging Face** (AI artifacts) +
-- **Docker Hub** (deployable units) +
-- **VS Code Marketplace** (extensions) +
-- **MCP Registries** (protocol servers)
+## Production Functionality
 
-...adapted for AI runtimes.
+- PostgreSQL persistence with SQLx migrations (10 tables: publishers, api_tokens, packages, manifests, artifacts, signatures, reviews, trust_transitions, download_events, audit_events)
+- Token revocation and constant-time bcrypt comparison
+- Immutable audit events for all trust transitions and critical operations
+- Rate limiting for publish, search, download, and auth endpoints
+- HTTPS enforcement for artifact URLs in production
+- No client-self-assigned trust levels above Community
+- Secure defaults: localhost bind, configured CORS, body limits, timeouts
 
-## Pandora is the flagship runtime
+## Future Roadmap
 
-Pandora is the first runtime to consume KUBER packages. But K-O Palace is runtime-agnostic. Other runtimes (Goose, Cline, Continue, Aider, Claude Code, Codex, OpenCode) can consume packages via integration adapters.
+- OCI artifact registry adapter
+- S3 / Azure Blob / GCS storage adapters
+- GitLab and Codeberg release metadata backends
+- WebHOOK-based package update notifications
+- Semantic versioning constraint resolver for dependencies
+- Package signing key rotation workflow
+- Federated registry sync (mirror mode)
+- SBOM generation per package version
+- Search index (PostgreSQL full-text or Meilisearch)
 
-## What can be published?
+## Local Development
 
-Everything an AI runtime needs:
+### Prerequisites
 
-| Category | Examples |
-|----------|----------|
-| **Genes** | Atomic capabilities (browser, shell, filesystem, git) |
-| **Harnesses** | Source, Meta, Domain orchestration layers |
-| **MCP Servers** | Model Context Protocol servers |
-| **Skills** | SKILL.md loaded capabilities |
-| **Providers** | LLM provider backends (Ollama, OpenAI, Anthropic) |
-| **Coding Agents** | Integration packages for coding agents |
-| **Workflows** | Reusable multi-step execution plans |
-| **Memory Packs** | Memory schema templates |
-| **Templates** | Project templates |
-| **Personas** | AI persona definitions |
-| **Policies** | Governance policy definitions |
-| **Benchmarks** | Performance benchmarks |
-| **Datasets** | Training/eval datasets |
-| **Plugins** | Dynamically loaded plugins |
-| **Connectors** | External protocol connectors |
-| **Distributions** | Complete runtime distributions |
+- Rust 1.75+ (`rustup`)
+- PostgreSQL 14+ (for production mode)
+- Node.js 18+ (only if modifying the frontend, if any)
 
-## Architecture
-
-```
-                 K-O PALACE
-
-          ┌────────────────────┐
-          │     Backend API    │
-          │     (Rust/Axum)    │
-          └─────────┬──────────┘
-                    │
-      ┌─────────────┼─────────────┐
-      │             │             │
-      ▼             ▼             ▼
-  Web App      Tauri App     Pandora CLI
- (Next.js)    (Desktop)    (install/publish)
-```
-
-One backend. Three ways to use it.
-
-## KUBER Manifest Specification
-
-The [KUBER Manifest Specification](specs/MANIFEST_SPEC.md) is an open standard. Anyone can implement it.
-
-```
-KUBER Specification
-  │
-  ├── Manifest Spec
-  ├── Registry API
-  ├── Package Format
-  ├── Trust Metadata
-  └── Compatibility Rules
-
-          │
-
-  Implementations
-
-  ├── K-O Palace (official registry + marketplace)
-  ├── Pandora (flagship runtime consumer)
-  ├── Future Runtime A
-  ├── Future Runtime B
-  └── Community Tools
-```
-
-## Storage
-
-K-O Palace separates the **registry** (metadata) from **distribution** (storage).
-
-- **Registry**: Stores package metadata, versions, manifests, trust info, reviews
-- **Distribution**: Package files stored in pluggable backends (GitHub Releases by default)
-
-```
-GitHub Releases (default) → GitLab → OCI → S3 → Self-hosted
-```
-
-## Trust Levels
-
-| Level | Meaning |
-|-------|---------|
-| Experimental | Unreviewed, use at own risk |
-| Community | Published by community member, basic checks |
-| Verified | Publisher verified, signature valid, security scan passed |
-| Official | Published by the runtime's official team |
-| Enterprise | Published by enterprise with commercial support |
-| Certified | Full security audit + compatibility testing + certification |
-
-## Quick Start
+### Quick Start (In-Memory)
 
 ```bash
-# Clone
-git clone https://github.com/anisayakmitra-in/k-o-palace.git
-cd k-o-palace
+cargo run
+```
 
-# Build
+The server binds to `127.0.0.1:3001` by default.
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `PALACE_BIND` | `127.0.0.1:3001` | Server bind address |
+| `PALACE_PUBLIC_URL` | `http://127.0.0.1:3001` | Public URL for downloads |
+| `DATABASE_URL` | `postgres://...` | PostgreSQL connection string |
+| `PALACE_CORS_ORIGINS` | (empty) | Comma-separated allowed origins |
+| `PALACE_SEED_SAMPLES` | `false` | Seed sample packages on startup |
+
+## PostgreSQL Setup
+
+```bash
+createdb kopalace
+psql kopalace -c "CREATE USER kopalace WITH PASSWORD 'kopalace';"
+psql kopalace -c "GRANT ALL ON DATABASE kopalace TO kopalace;"
+
+# Run migrations
+DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run --features postgres
+```
+
+### Migrations
+
+Migrations are in `migrations/` and managed by SQLx:
+
+```bash
+cargo install sqlx-cli --no-default-features --features postgres,rustls
+sqlx migrate run --source migrations
+```
+
+## Publisher Registration
+
+```bash
+# Register a new publisher (returns API token)
+curl -X POST http://127.0.0.1:3001/api/v1/publishers \
+  -H "Content-Type: application/json" \
+  -d '{"name": "myorg", "display_name": "My Organization"}'
+```
+
+Store the returned token securely. It is shown only once.
+
+## Token Creation and Revocation
+
+Tokens are bcrypt-hashed at rest. The plaintext token is returned only at creation time.
+
+```bash
+# Revoke a token
+curl -X DELETE http://127.0.0.1:3001/api/v1/tokens/{token_id} \
+  -H "Authorization: Bearer kop_..."
+```
+
+## Package Publishing
+
+```bash
+curl -X POST http://127.0.0.1:3001/api/v1/packages \
+  -H "Authorization: Bearer kop_..." \
+  -H "Content-Type: application/json" \
+  -d @package.json
+```
+
+Where `package.json` contains the package metadata with required fields: `id`, `name`, `version`, `kind`, `description`, `author`, `license`, `trust`, `compatibility`, `repository`, `artifact_url`, `tags`.
+
+## Signature Creation
+
+K-O Palace verifies Ed25519 signatures server-side. To sign a package:
+
+```bash
+# Generate Ed25519 keypair
+openssl genpkey -algorithm Ed25519 -out private_key.pem
+openssl pkey -in private_key.pem -pubout -out public_key.pem
+
+# Sign the artifact content
+ openssl dgst -sha256 -sign private_key.pem artifact.tar.gz | base64 > signature.b64
+
+# Publish with signature
+curl -X POST http://127.0.0.1:3001/api/v1/packages \
+  -H "Authorization: Bearer kop_..." \
+  -H "Content-Type: application/json" \
+  -d '{"id": "...", "trust": {"level": "community", "signature": "...", "public_key": "...", "content_hash": "..."}, ...}'
+```
+
+## Artifact Hosting
+
+Artifacts must be served over HTTPS from an allowlisted host. Default allowed hosts:
+- `github.com`
+- `objects.githubusercontent.com`
+
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable.
+
+## Trust Review
+
+Trust levels above `Community` (Verified, Official, Enterprise, Certified) require moderator or administrator approval. Clients cannot self-assign these levels. Each transition is recorded with approver identity, timestamp, and reason.
+
+## Self-Hosting
+
+```bash
+# Build release binary
 cargo build --release
 
-# Run
-./target/release/k-o-palace
-
-# API
-curl http://localhost:3001/api/v1/packages
-curl http://localhost:3001/api/v1/search?q=browser
-curl http://localhost:3001/api/v1/featured
-curl http://localhost:3001/api/v1/trending
+# Run with PostgreSQL
+DATABASE_URL=postgres://user:pass@localhost:5432/kopalace \
+  ./target/release/k-o-palace
 ```
 
-## API Endpoints
+For public deployment, set:
+- `PALACE_BIND=0.0.0.0:3001`
+- `PALACE_PUBLIC_URL=https://registry.example.com`
+- `PALACE_CORS_ORIGINS=https://app.example.com`
 
+## Pandora CLI Integration
+
+K-O Palace is designed to be runtime-agnostic and compatible with Pandora's package metadata format. Pandora clients can query the registry using:
+
+```bash
+pandora palace search <query>
+pandora palace install <package-id>
+pandora palace list
 ```
-GET    /api/v1/packages                    List packages (paginated)
-GET    /api/v1/packages/:id                Get package metadata
-GET    /api/v1/search?q=...               Search packages
-GET    /api/v1/categories                  List categories
-GET    /api/v1/featured                    Featured packages
-GET    /api/v1/trending                    Trending packages
-GET    /api/v1/newest                      Newest packages
-POST   /api/v1/packages                    Publish a package
-GET    /health                             Health check
-```
 
-## Roadmap
+The API returns package metadata with these fields (compatible with Pandora's expectations):
+- `id`, `name`, `version`, `kind`, `description`, `author`, `license`
+- `trust` (level, signature, public_key, content_hash, publisher)
+- `compatibility` (runtimes,.arch)
+- `repository`, `artifact_url`, `tags`
 
-### Phase 1 (Current)
-- [x] Rust backend (Axum)
-- [x] KUBER Manifest Specification
-- [x] In-memory store with sample packages
-- [x] REST API: list, search, featured, trending, newest
-- [ ] PostgreSQL persistence
-- [ ] GitHub Releases storage backend
-- [ ] CLI integration
+Additional fields are allowed and ignored by Pandora clients.
 
-### Phase 2
-- [ ] Next.js web marketplace
-- [ ] Full-text search (Meilisearch)
-- [ ] Package pages with reviews
-- [ ] User profiles
-- [ ] Publisher verification
+## API Compatibility
 
-### Phase 3
-- [ ] Tauri desktop app
-- [ ] One-click install/update
-- [ ] Local Pandora management
-- [ ] Provider configuration
+All endpoints are versioned under `/api/v1`. Breaking changes require a new API version. The existing read endpoints (`GET`) are preserved. Write endpoints (`POST`, `PUT`, `DELETE`) require authentication.
 
-### Phase 4
-- [ ] Commercial features
-- [ ] Private registries
-- [ ] Organizations
-- [ ] Paid packages
-- [ ] Enterprise support
+## Security Model
+
+- **Authentication**: Bearer token (bcrypt-hashed at rest)
+- **Authorization**: Role-based (publisher, maintainer, moderator, administrator)
+- **Trust levels**: Server-enforced transitions, no client self-assignment above Community
+- **Signatures**: Ed25519 verified server-side
+- **Content hash**: SHA-256 verified against uploaded artifact
+- **Artifacts**: HTTPS-only, host allowlisted, redirect-limited, size-limited, content-type validated
+- **CORS**: Configured origins only, never permissive
+- **Rate limits**: Publish (10/min), Search (120/min), Download (240/min), Auth (10/min)
+- **Request limits**: 16 MB body, 30 second timeout
+- **Audit**: Immutable audit events for all trust transitions and critical operations
+- **No logging** of tokens, private keys, or package secrets
 
 ## License
 
-Apache 2.0 — The KUBER Manifest Specification is open source. Anyone may implement it.
+Apache-2.0

@@ -1,176 +1,44 @@
 //! K-O Palace — Open AI Runtime Registry
-//!
-//! The sovereign ecosystem for discovering, validating, signing, versioning,
-//! evolving, and distributing AI runtime components.
-//!
-//! Pandora is the flagship runtime. Other runtimes can consume KUBER packages
-//! via integration adapters.
 
-use axum::{
-    extract::{Path, Query, State},
-    http::StatusCode,
-    response::Redirect,
-    routing::get,
-    Json, Router,
-};
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use tower_http::{cors::CorsLayer, trace::TraceLayer};
-
-mod store;
-mod types;
-
-use store::PackageStore;
-use types::*;
-
-// ── App State ──
-
-pub struct AppState {
-    pub store: PackageStore,
-}
-
-// ── API Handlers ──
-
-async fn list_packages(
-    State(state): State<Arc<RwLock<AppState>>>,
-    Query(params): Query<ListParams>,
-) -> Json<PackageListResponse> {
-    let state = state.read().await;
-    let packages = state.store.list(&params);
-    Json(PackageListResponse {
-        total: packages.len(),
-        packages,
-    })
-}
-
-async fn get_package(
-    State(state): State<Arc<RwLock<AppState>>>,
-    Path(id): Path<String>,
-) -> Result<Json<Package>, (StatusCode, String)> {
-    let state = state.read().await;
-    state
-        .store
-        .get(&id)
-        .map(Json)
-        .ok_or((StatusCode::NOT_FOUND, format!("Package '{}' not found", id)))
-}
-
-async fn search_packages(
-    State(state): State<Arc<RwLock<AppState>>>,
-    Query(params): Query<SearchParams>,
-) -> Json<PackageListResponse> {
-    let state = state.read().await;
-    let packages = state.store.search(&params.q);
-    Json(PackageListResponse {
-        total: packages.len(),
-        packages,
-    })
-}
-
-async fn get_featured(State(state): State<Arc<RwLock<AppState>>>) -> Json<PackageListResponse> {
-    let state = state.read().await;
-    let packages = state.store.featured();
-    Json(PackageListResponse {
-        total: packages.len(),
-        packages,
-    })
-}
-
-async fn get_trending(State(state): State<Arc<RwLock<AppState>>>) -> Json<PackageListResponse> {
-    let state = state.read().await;
-    let packages = state.store.trending();
-    Json(PackageListResponse {
-        total: packages.len(),
-        packages,
-    })
-}
-
-async fn get_newest(State(state): State<Arc<RwLock<AppState>>>) -> Json<PackageListResponse> {
-    let state = state.read().await;
-    let packages = state.store.newest();
-    Json(PackageListResponse {
-        total: packages.len(),
-        packages,
-    })
-}
-
-async fn get_categories(State(state): State<Arc<RwLock<AppState>>>) -> Json<Vec<String>> {
-    let state = state.read().await;
-    Json(state.store.categories())
-}
-
-async fn publish_package(
-    State(state): State<Arc<RwLock<AppState>>>,
-    Json(pkg): Json<Package>,
-) -> Result<Json<Package>, (StatusCode, String)> {
-    let mut state = state.write().await;
-    state
-        .store
-        .publish(pkg)
-        .map(Json)
-        .map_err(|e| (StatusCode::BAD_REQUEST, e))
-}
-
-async fn download_package(
-    State(state): State<Arc<RwLock<AppState>>>,
-    Path(id): Path<String>,
-) -> Result<Redirect, (StatusCode, String)> {
-    let state = state.read().await;
-    let package = state
-        .store
-        .get(&id)
-        .ok_or((StatusCode::NOT_FOUND, format!("Package '{}' not found", id)))?;
-    let artifact_url = package.artifact_url.ok_or((
-        StatusCode::NOT_FOUND,
-        format!("Package '{}' has no published artifact", id),
-    ))?;
-    Ok(Redirect::temporary(&artifact_url))
-}
-async fn health() -> &'static str {
-    "ok"
-}
-
-// ── Server ──
+use k_o_palace::{app::AppState, config::PalaceConfig, routes::router};
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
-async fn main() {
-    tracing_subscriber::fmt().init();
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("info,k_o_palace=debug"));
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(filter)
+        .init();
 
-    let state = Arc::new(RwLock::new(AppState {
-        store: PackageStore::new(),
-    }));
+    let config = PalaceConfig::from_env();
+    let state = AppState::in_memory(config.clone());
 
-    // Seed with sample packages
-    {
-        let mut s = state.write().await;
-        s.store.seed_samples();
+    if config.registry.seed_samples {
+        if let Err(e) = state.seed_samples().await {
+            tracing::error!("failed to seed sample packages: {}", e);
+        }
     }
 
-    let app = Router::new()
-        .route("/health", get(health))
-        .route("/api/v1/packages", get(list_packages).post(publish_package))
-        .route("/api/v1/packages/{id}", get(get_package))
-        .route("/api/v1/packages/{id}/download", get(download_package))
-        .route("/api/v1/search", get(search_packages))
-        .route("/api/v1/categories", get(get_categories))
-        .route("/api/v1/featured", get(get_featured))
-        .route("/api/v1/trending", get(get_trending))
-        .route("/api/v1/newest", get(get_newest))
-        .route("/api/v1/runtimes", get(get_runtimes))
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    let addr = config.server.bind_addr;
+    let app = router(state);
 
-    let addr = "0.0.0.0:3001";
-    println!("K-O Palace listening on http://{addr}");
-    println!("  API:    http://{addr}/api/v1/packages");
-    println!("  Health: http://{addr}/health");
+    tracing::info!("K-O Palace listening on http://{}", addr);
+    tracing::info!("  API:    http://{}/api/v1/packages", addr);
+    tracing::info!("  Health: http://{}/health", addr);
 
-    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
+    let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
+        tracing::error!("failed to bind to {}: {}", addr, e);
+        e
+    })?;
 
-async fn get_runtimes(State(state): State<Arc<RwLock<AppState>>>) -> Json<Vec<String>> {
-    let state = state.read().await;
-    Json(state.store.runtimes())
+    axum::serve(listener, app)
+        .await
+        .map_err(|e: std::io::Error| {
+            tracing::error!("server error: {}", e);
+            Box::<dyn std::error::Error + Send + Sync>::from(e)
+        })?;
+
+    Ok(())
 }
