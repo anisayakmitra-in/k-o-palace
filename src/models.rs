@@ -52,12 +52,18 @@ pub struct TrustInfo {
 /// Trust levels — from experimental to certified.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TrustLevel {
+    #[serde(alias = "experimental")]
     Experimental,
+    #[serde(alias = "community")]
     Community,
+    #[serde(alias = "verified")]
     Verified,
+    #[serde(alias = "official")]
     Official,
+    #[serde(alias = "enterprise")]
     Enterprise,
     #[default]
+    #[serde(alias = "certified")]
     Certified,
 }
 

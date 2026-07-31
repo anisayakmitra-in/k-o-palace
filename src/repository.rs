@@ -44,6 +44,10 @@ impl PackageRepository {
         dispatch!(self, get_publisher_by_name, name)
     }
 
+    pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
+        dispatch!(self, list_publishers,)
+    }
+
     pub async fn update_publisher_role(&self, id: Uuid, role: Role) -> PalaceResult<Publisher> {
         dispatch!(self, update_publisher_role, id, role)
     }

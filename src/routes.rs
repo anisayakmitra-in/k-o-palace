@@ -424,11 +424,8 @@ async fn get_publisher(
 async fn list_publishers(
     State(state): State<Arc<AppState>>,
 ) -> PalaceResult<Json<Vec<PublisherResponse>>> {
-    // List all publishers — the in-memory repo doesn't have a list_publishers method,
-    // so we return a simple empty list for now. A full implementation would add
-    // a repo method.
-    let _ = &state;
-    Ok(Json(vec![]))
+    let publishers = state.repo.list_publishers().await?;
+    Ok(Json(publishers.into_iter().map(Into::into).collect()))
 }
 
 // ── Token Management Handlers ──

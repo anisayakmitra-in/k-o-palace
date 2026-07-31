@@ -265,3 +265,32 @@ async fn rate_limit_publish() {
     }
     assert_eq!(last_status, StatusCode::TOO_MANY_REQUESTS);
 }
+
+#[tokio::test]
+async fn list_publishers_returns_registered_profiles_in_name_order() {
+    let state = test_state();
+    k_o_palace::auth::register_publisher(&state.repo, "zeta", "Zeta", None, None)
+        .await
+        .unwrap();
+    k_o_palace::auth::register_publisher(&state.repo, "alpha", "Alpha", None, None)
+        .await
+        .unwrap();
+
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/publishers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let publishers: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(publishers[0]["name"], "alpha");
+    assert_eq!(publishers[1]["name"], "zeta");
+}

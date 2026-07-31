@@ -90,6 +90,13 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "publisher not found"))
     }
 
+    pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
+        let map = self.publishers.read().await;
+        let mut publishers = map.values().cloned().collect::<Vec<_>>();
+        publishers.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(publishers)
+    }
+
     pub async fn update_publisher_role(&self, id: Uuid, role: Role) -> PalaceResult<Publisher> {
         let mut map = self.publishers.write().await;
         let publisher = map

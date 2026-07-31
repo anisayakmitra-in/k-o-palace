@@ -187,6 +187,28 @@ impl PostgresRepository {
         })
     }
 
+    pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
+        let rows = sqlx::query_as::<_, (Uuid, String, String, Option<String>, Option<String>, String, chrono::DateTime<Utc>)>(
+            "SELECT id, name, display_name, email, website, role, created_at FROM publishers ORDER BY name ASC"
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| PalaceError::new(PalaceErrorCode::ServerError, error.to_string()))?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| Publisher {
+                id: row.0,
+                name: row.1,
+                display_name: row.2,
+                email: row.3,
+                website: row.4,
+                role: Role::parse(&row.5).unwrap_or(Role::Publisher),
+                created_at: row.6,
+            })
+            .collect())
+    }
+
     pub async fn update_publisher_role(&self, id: Uuid, role: Role) -> PalaceResult<Publisher> {
         let row = sqlx::query_as::<_, (Uuid, String, String, Option<String>, Option<String>, String, chrono::DateTime<Utc>)>(
             "UPDATE publishers SET role = $2 WHERE id = $1 RETURNING id, name, display_name, email, website, role, created_at"
