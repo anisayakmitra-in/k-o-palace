@@ -121,3 +121,18 @@ fn sample_packages() -> Vec<Package> {
         },
     ]
 }
+
+#[cfg(feature = "postgres")]
+impl AppState {
+    pub async fn postgres(config: PalaceConfig) -> Result<Self, crate::error::PalaceError> {
+        let repository =
+            crate::repository::postgres::PostgresRepository::new(&config.database.url).await?;
+        repository.migrate().await?;
+        Ok(Self {
+            storage: ArtifactStorage::from_config(&config),
+            rate_limiters: Arc::new(RateLimiters::from_config(&config)),
+            config,
+            repo: PackageRepository::Postgres(repository),
+        })
+    }
+}

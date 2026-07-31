@@ -13,6 +13,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = PalaceConfig::from_env();
+    #[cfg(feature = "postgres")]
+    let state = AppState::postgres(config.clone()).await?;
+    #[cfg(not(feature = "postgres"))]
     let state = AppState::in_memory(config.clone());
 
     if config.registry.seed_samples {

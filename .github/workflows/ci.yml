@@ -49,6 +49,11 @@ jobs:
       - name: cargo test
         run: cargo test --all-targets -- --test-threads=1
 
+      - name: cargo test with PostgreSQL
+        run: cargo test --locked --all-targets --features postgres -- --test-threads=1
+        env:
+          KOP_TEST_DATABASE_URL: postgres://kopalace:kopalace@localhost:5432/kopalace_test
+
       - name: cargo audit
         run: cargo install cargo-audit --locked || true && cargo audit || true
 

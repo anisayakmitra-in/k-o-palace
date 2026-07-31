@@ -550,7 +550,7 @@ impl PostgresRepository {
     pub async fn add_review(&self, review: &Review) -> PalaceResult<Review> {
         let id = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO reviews (id, package_id, reviewer_id, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+            "INSERT INTO reviews (id, package_id, publisher_id, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
         )
         .bind(id)
         .bind(&review.package_id)
@@ -570,7 +570,7 @@ impl PostgresRepository {
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
         let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i16, Option<String>, chrono::DateTime<Utc>)>(
-            "SELECT id, package_id, reviewer_id, rating, comment, created_at FROM reviews WHERE package_id = $1 ORDER BY created_at DESC"
+            "SELECT id, package_id, publisher_id, rating, comment, created_at FROM reviews WHERE package_id = $1 ORDER BY created_at DESC"
         )
         .bind(package_id)
         .fetch_all(&self.pool)
@@ -637,11 +637,12 @@ impl PostgresRepository {
     pub async fn record_audit_event(&self, event: &AuditEvent) -> PalaceResult<()> {
         let id = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO audit_events (id, event_type, actor_id, package_id, details, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
         )
         .bind(id)
         .bind(&event.event_type)
         .bind(event.actor_id)
+        .bind(event.package_id.as_ref().map(|_| "package"))
         .bind(&event.package_id)
         .bind(&event.details)
         .bind(event.created_at)
