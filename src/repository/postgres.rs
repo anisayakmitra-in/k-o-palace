@@ -10,7 +10,61 @@ use chrono::Utc;
 use sqlx::postgres::PgPool;
 use uuid::Uuid;
 
+/// Helper struct for SQLx row mapping.
+#[derive(sqlx::FromRow)]
+struct PackageRow {
+    id: String,
+    name: String,
+    version: String,
+    kind: String,
+    description: String,
+    author: String,
+    license: String,
+    repository: Option<String>,
+    artifact_url: Option<String>,
+    homepage: Option<String>,
+    tags: serde_json::Value,
+    capabilities: serde_json::Value,
+    compatibility: serde_json::Value,
+    downloads: i64,
+    success_rate: f32,
+    created_at: chrono::DateTime<Utc>,
+    updated_at: chrono::DateTime<Utc>,
+}
+
+impl From<PackageRow> for Package {
+    fn from(r: PackageRow) -> Self {
+        Package {
+            id: r.id,
+            name: r.name,
+            version: r.version,
+            kind: PackageKind::parse(&r.kind).unwrap_or(PackageKind::Gene),
+            description: r.description,
+            author: r.author.clone(),
+            license: r.license,
+            trust: TrustInfo {
+                level: TrustLevel::Community,
+                signature: None,
+                public_key: None,
+                content_hash: None,
+                publisher: r.author,
+            },
+            repository: r.repository,
+            artifact_url: r.artifact_url,
+            homepage: r.homepage,
+            tags: serde_json::from_value(r.tags).unwrap_or_default(),
+            capabilities: serde_json::from_value(r.capabilities).unwrap_or_default(),
+            compatibility: serde_json::from_value(r.compatibility).unwrap_or_default(),
+            downloads: r.downloads as u64,
+            success_rate: r.success_rate as f64,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }
+    }
+}
+
 /// PostgreSQL-backed repository.
+#[derive(Debug, Clone)]
 pub struct PostgresRepository {
     pool: PgPool,
 }
@@ -28,7 +82,7 @@ impl PostgresRepository {
     }
 
     pub async fn migrate(&self) -> PalaceResult<()> {
-        sqlx::migrate!("../migrations")
+        sqlx::migrate!()
             .run(&self.pool)
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
@@ -151,16 +205,16 @@ impl PostgresRepository {
 
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         sqlx::query(
-            "INSERT INTO api_tokens (id, publisher_id, token_hash, description, created_at, revoked_at, last_used_at)
+            "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7)"
         )
         .bind(token.id)
         .bind(token.publisher_id)
         .bind(&token.token_hash)
-        .bind(&token.description)
+        .bind(&token.name)
         .bind(token.created_at)
         .bind(token.revoked_at)
-        .bind(token.last_used_at)
+        .bind(token.expires_at)
         .execute(&self.pool)
         .await
         .map(|_| ())
@@ -168,9 +222,8 @@ impl PostgresRepository {
     }
 
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
-        // Fetch all non-revoked tokens and bcrypt-verify
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
-            "SELECT id, publisher_id, token_hash, description, created_at, revoked_at, last_used_at FROM api_tokens WHERE revoked_at IS NULL"
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
+            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at FROM api_tokens WHERE revoked_at IS NULL"
         )
         .fetch_all(&self.pool)
         .await
@@ -182,10 +235,10 @@ impl PostgresRepository {
                     id: row.0,
                     publisher_id: row.1,
                     token_hash: row.2,
-                    description: row.3,
+                    name: row.3,
                     created_at: row.4,
                     revoked_at: row.5,
-                    last_used_at: row.6,
+                    expires_at: row.6,
                 });
             }
         }
@@ -205,8 +258,8 @@ impl PostgresRepository {
     }
 
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
-            "SELECT id, publisher_id, token_hash, description, created_at, revoked_at, last_used_at FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC"
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
+            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC"
         )
         .bind(publisher_id)
         .fetch_all(&self.pool)
@@ -219,27 +272,24 @@ impl PostgresRepository {
                 id: r.0,
                 publisher_id: r.1,
                 token_hash: r.2,
-                description: r.3,
+                name: r.3,
                 created_at: r.4,
                 revoked_at: r.5,
-                last_used_at: r.6,
+                expires_at: r.6,
             })
             .collect())
     }
 
     pub async fn list_packages(
         &self,
-        filters: PackageFilters,
+        _filters: PackageFilters,
         pagination: Pagination,
     ) -> PalaceResult<(usize, Vec<Package>)> {
-        // Simplified: fetch all and filter in Rust. Production would use SQL filters.
-        let limit = pagination.limit;
-        let offset = pagination.offset;
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages ORDER BY created_at DESC LIMIT $1 OFFSET $2"
         )
-        .bind(limit as i64)
-        .bind(offset as i64)
+        .bind(pagination.limit as i64)
+        .bind(pagination.offset as i64)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
@@ -249,42 +299,14 @@ impl PostgresRepository {
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
-        let pkgs: Vec<Package> = rows
-            .into_iter()
-            .map(|r| Package {
-                id: r.0,
-                name: r.1,
-                version: r.2,
-                kind: PackageKind::parse(&r.3).unwrap_or(PackageKind::Gene),
-                description: r.4,
-                author: r.5,
-                license: r.6,
-                trust: TrustInfo {
-                    level: TrustLevel::Community,
-                    signature: None,
-                    public_key: None,
-                    content_hash: None,
-                    publisher: r.5.clone(),
-                },
-                repository: r.7,
-                artifact_url: r.8,
-                homepage: r.9,
-                tags: serde_json::from_value(r.10).unwrap_or_default(),
-                capabilities: serde_json::from_value(r.11).unwrap_or_default(),
-                compatibility: serde_json::from_value(r.12).unwrap_or_default(),
-                downloads: r.13 as u64,
-                success_rate: r.14,
-                created_at: r.15,
-                updated_at: r.16,
-            })
-            .collect();
-
-        Ok((total as usize, pkgs))
+        Ok((
+            total as usize,
+            rows.into_iter().map(Package::from).collect(),
+        ))
     }
 
     pub async fn get_package(&self, id: &str) -> PalaceResult<Package> {
-        // Get latest version
-        let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let row = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages WHERE id = $1 ORDER BY created_at DESC LIMIT 1"
         )
         .bind(id)
@@ -293,36 +315,11 @@ impl PostgresRepository {
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
 
-        Ok(Package {
-            id: row.0,
-            name: row.1,
-            version: row.2,
-            kind: PackageKind::parse(&row.3).unwrap_or(PackageKind::Gene),
-            description: row.4,
-            author: row.5,
-            license: row.6,
-            trust: TrustInfo {
-                level: TrustLevel::Community,
-                signature: None,
-                public_key: None,
-                content_hash: None,
-                publisher: row.5.clone(),
-            },
-            repository: row.7,
-            artifact_url: row.8,
-            homepage: row.9,
-            tags: serde_json::from_value(row.10).unwrap_or_default(),
-            capabilities: serde_json::from_value(row.11).unwrap_or_default(),
-            compatibility: serde_json::from_value(row.12).unwrap_or_default(),
-            downloads: row.13 as u64,
-            success_rate: row.14,
-            created_at: row.15,
-            updated_at: row.16,
-        })
+        Ok(row.into())
     }
 
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
-        let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let row = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages WHERE id = $1 AND version = $2"
         )
         .bind(id)
@@ -332,37 +329,12 @@ impl PostgresRepository {
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package version not found"))?;
 
-        Ok(Package {
-            id: row.0,
-            name: row.1,
-            version: row.2,
-            kind: PackageKind::parse(&row.3).unwrap_or(PackageKind::Gene),
-            description: row.4,
-            author: row.5,
-            license: row.6,
-            trust: TrustInfo {
-                level: TrustLevel::Community,
-                signature: None,
-                public_key: None,
-                content_hash: None,
-                publisher: row.5.clone(),
-            },
-            repository: row.7,
-            artifact_url: row.8,
-            homepage: row.9,
-            tags: serde_json::from_value(row.10).unwrap_or_default(),
-            capabilities: serde_json::from_value(row.11).unwrap_or_default(),
-            compatibility: serde_json::from_value(row.12).unwrap_or_default(),
-            downloads: row.13 as u64,
-            success_rate: row.14,
-            created_at: row.15,
-            updated_at: row.16,
-        })
+        Ok(row.into())
     }
 
     pub async fn list_versions(&self, id: &str) -> PalaceResult<Vec<VersionInfo>> {
-        let rows = sqlx::query_as::<_, (String, chrono::DateTime<Utc>, i64)>(
-            "SELECT version, created_at, downloads FROM packages WHERE id = $1 ORDER BY created_at DESC"
+        let rows = sqlx::query_as::<_, (String, chrono::DateTime<Utc>, Option<String>, Option<String>)>(
+            "SELECT version, created_at, artifact_url, NULL as content_hash FROM packages WHERE id = $1 ORDER BY created_at DESC"
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -374,7 +346,8 @@ impl PostgresRepository {
             .map(|r| VersionInfo {
                 version: r.0,
                 created_at: r.1,
-                downloads: r.2 as u64,
+                artifact_url: r.2,
+                content_hash: r.3,
             })
             .collect())
     }
@@ -449,15 +422,12 @@ impl PostgresRepository {
         pagination: Pagination,
     ) -> PalaceResult<(usize, Vec<Package>)> {
         let pattern = format!("%{query}%");
-        let limit = pagination.limit as i64;
-        let offset = pagination.offset as i64;
-
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages WHERE name ILIKE $1 OR description ILIKE $1 ORDER BY downloads DESC LIMIT $2 OFFSET $3"
         )
         .bind(&pattern)
-        .bind(limit)
-        .bind(offset)
+        .bind(pagination.limit as i64)
+        .bind(pagination.offset as i64)
         .fetch_all(&self.pool)
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
@@ -470,41 +440,14 @@ impl PostgresRepository {
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
-        let pkgs: Vec<Package> = rows
-            .into_iter()
-            .map(|r| Package {
-                id: r.0,
-                name: r.1,
-                version: r.2,
-                kind: PackageKind::parse(&r.3).unwrap_or(PackageKind::Gene),
-                description: r.4,
-                author: r.5,
-                license: r.6,
-                trust: TrustInfo {
-                    level: TrustLevel::Community,
-                    signature: None,
-                    public_key: None,
-                    content_hash: None,
-                    publisher: r.5.clone(),
-                },
-                repository: r.7,
-                artifact_url: r.8,
-                homepage: r.9,
-                tags: serde_json::from_value(r.10).unwrap_or_default(),
-                capabilities: serde_json::from_value(r.11).unwrap_or_default(),
-                compatibility: serde_json::from_value(r.12).unwrap_or_default(),
-                downloads: r.13 as u64,
-                success_rate: r.14,
-                created_at: r.15,
-                updated_at: r.16,
-            })
-            .collect();
-
-        Ok((total as usize, pkgs))
+        Ok((
+            total as usize,
+            rows.into_iter().map(Package::from).collect(),
+        ))
     }
 
     pub async fn featured(&self, limit: usize) -> PalaceResult<Vec<Package>> {
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages ORDER BY success_rate DESC, downloads DESC LIMIT $1"
         )
         .bind(limit as i64)
@@ -512,39 +455,11 @@ impl PostgresRepository {
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| Package {
-                id: r.0,
-                name: r.1,
-                version: r.2,
-                kind: PackageKind::parse(&r.3).unwrap_or(PackageKind::Gene),
-                description: r.4,
-                author: r.5,
-                license: r.6,
-                trust: TrustInfo {
-                    level: TrustLevel::Community,
-                    signature: None,
-                    public_key: None,
-                    content_hash: None,
-                    publisher: r.5.clone(),
-                },
-                repository: r.7,
-                artifact_url: r.8,
-                homepage: r.9,
-                tags: serde_json::from_value(r.10).unwrap_or_default(),
-                capabilities: serde_json::from_value(r.11).unwrap_or_default(),
-                compatibility: serde_json::from_value(r.12).unwrap_or_default(),
-                downloads: r.13 as u64,
-                success_rate: r.14,
-                created_at: r.15,
-                updated_at: r.16,
-            })
-            .collect())
+        Ok(rows.into_iter().map(Package::from).collect())
     }
 
     pub async fn trending(&self, limit: usize) -> PalaceResult<Vec<Package>> {
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages ORDER BY downloads DESC LIMIT $1"
         )
         .bind(limit as i64)
@@ -552,39 +467,11 @@ impl PostgresRepository {
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| Package {
-                id: r.0,
-                name: r.1,
-                version: r.2,
-                kind: PackageKind::parse(&r.3).unwrap_or(PackageKind::Gene),
-                description: r.4,
-                author: r.5,
-                license: r.6,
-                trust: TrustInfo {
-                    level: TrustLevel::Community,
-                    signature: None,
-                    public_key: None,
-                    content_hash: None,
-                    publisher: r.5.clone(),
-                },
-                repository: r.7,
-                artifact_url: r.8,
-                homepage: r.9,
-                tags: serde_json::from_value(r.10).unwrap_or_default(),
-                capabilities: serde_json::from_value(r.11).unwrap_or_default(),
-                compatibility: serde_json::from_value(r.12).unwrap_or_default(),
-                downloads: r.13 as u64,
-                success_rate: r.14,
-                created_at: r.15,
-                updated_at: r.16,
-            })
-            .collect())
+        Ok(rows.into_iter().map(Package::from).collect())
     }
 
     pub async fn newest(&self, limit: usize) -> PalaceResult<Vec<Package>> {
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>, Option<String>, Option<String>, serde_json::Value, serde_json::Value, serde_json::Value, i64, f32, chrono::DateTime<Utc>, chrono::DateTime<Utc>)>(
+        let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
             "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, created_at, updated_at FROM packages ORDER BY created_at DESC LIMIT $1"
         )
         .bind(limit as i64)
@@ -592,35 +479,7 @@ impl PostgresRepository {
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| Package {
-                id: r.0,
-                name: r.1,
-                version: r.2,
-                kind: PackageKind::parse(&r.3).unwrap_or(PackageKind::Gene),
-                description: r.4,
-                author: r.5,
-                license: r.6,
-                trust: TrustInfo {
-                    level: TrustLevel::Community,
-                    signature: None,
-                    public_key: None,
-                    content_hash: None,
-                    publisher: r.5.clone(),
-                },
-                repository: r.7,
-                artifact_url: r.8,
-                homepage: r.9,
-                tags: serde_json::from_value(r.10).unwrap_or_default(),
-                capabilities: serde_json::from_value(r.11).unwrap_or_default(),
-                compatibility: serde_json::from_value(r.12).unwrap_or_default(),
-                downloads: r.13 as u64,
-                success_rate: r.14,
-                created_at: r.15,
-                updated_at: r.16,
-            })
-            .collect())
+        Ok(rows.into_iter().map(Package::from).collect())
     }
 
     pub async fn categories(&self) -> PalaceResult<Vec<String>> {
@@ -649,7 +508,7 @@ impl PostgresRepository {
         let mut runtimes = std::collections::BTreeSet::new();
         for (compat,) in rows {
             if let Ok(ci) = serde_json::from_value::<CompatibilityInfo>(compat) {
-                for rt in ci.runtimes.iter().flatten() {
+                for rt in ci.runtimes.iter() {
                     runtimes.insert(rt.clone());
                 }
             }
@@ -660,11 +519,11 @@ impl PostgresRepository {
     pub async fn add_review(&self, review: &Review) -> PalaceResult<Review> {
         let id = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO reviews (id, package_id, publisher_id, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+            "INSERT INTO reviews (id, package_id, reviewer_id, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
         )
         .bind(id)
         .bind(&review.package_id)
-        .bind(review.publisher_id)
+        .bind(review.reviewer_id)
         .bind(review.rating)
         .bind(&review.comment)
         .bind(review.created_at)
@@ -679,8 +538,8 @@ impl PostgresRepository {
     }
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
-        let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i32, String, chrono::DateTime<Utc>)>(
-            "SELECT id, package_id, publisher_id, rating, comment, created_at FROM reviews WHERE package_id = $1 ORDER BY created_at DESC"
+        let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i16, Option<String>, chrono::DateTime<Utc>)>(
+            "SELECT id, package_id, reviewer_id, rating, comment, created_at FROM reviews WHERE package_id = $1 ORDER BY created_at DESC"
         )
         .bind(package_id)
         .fetch_all(&self.pool)
@@ -692,7 +551,7 @@ impl PostgresRepository {
             .map(|r| Review {
                 id: r.0,
                 package_id: r.1,
-                publisher_id: r.2,
+                reviewer_id: r.2,
                 rating: r.3,
                 comment: r.4,
                 created_at: r.5,
@@ -737,7 +596,7 @@ impl PostgresRepository {
                 package_id: r.1,
                 from_level: r.2,
                 to_level: r.3,
-                approved_by: r.4,
+                approved_by: r.4.unwrap_or_default(),
                 reason: r.5,
                 created_at: r.6,
             })
@@ -746,16 +605,14 @@ impl PostgresRepository {
 
     pub async fn record_audit_event(&self, event: &AuditEvent) -> PalaceResult<()> {
         let id = uuid::Uuid::now_v7();
-        let metadata = serde_json::to_value(&event.metadata).unwrap_or_default();
         sqlx::query(
-            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            "INSERT INTO audit_events (id, event_type, actor_id, package_id, details, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
         )
         .bind(id)
         .bind(&event.event_type)
         .bind(event.actor_id)
-        .bind(&event.target_type)
-        .bind(&event.target_id)
-        .bind(&metadata)
+        .bind(&event.package_id)
+        .bind(&event.details)
         .bind(event.created_at)
         .execute(&self.pool)
         .await
