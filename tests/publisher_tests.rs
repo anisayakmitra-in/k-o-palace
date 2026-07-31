@@ -294,3 +294,34 @@ async fn list_publishers_returns_registered_profiles_in_name_order() {
     assert_eq!(publishers[0]["name"], "alpha");
     assert_eq!(publishers[1]["name"], "zeta");
 }
+
+#[tokio::test]
+async fn public_publisher_response_omits_registration_email() {
+    let state = test_state();
+    k_o_palace::auth::register_publisher(
+        &state.repo,
+        "privateorg",
+        "Private Org",
+        Some("owner@example.com".into()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/publishers/privateorg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let publisher: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(publisher.get("email").is_none());
+}

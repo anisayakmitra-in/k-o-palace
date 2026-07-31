@@ -49,7 +49,7 @@ These discrepancies require migration repair and real PostgreSQL integration tes
 
 - Publisher registration is unauthenticated and immediately issues a publishing token. There is no identity-verification, invitation, or anti-abuse flow.
 - Tokens have no scopes, expiry input, last-used update, or separate administrative management policy.
-- Publisher responses include the optional email field despite being described as public responses.
+
 - Rate limits use one static key per endpoint. They are not per user, IP address, or trusted proxy identity.
 - Reviews can be created, but there is no one-review policy, edit/delete flow, moderation route, or reputation calculation.
 - Discovery endpoints exist, but featured and trending use simple stored package fields. Download events and anti-manipulation rules are not implemented.
