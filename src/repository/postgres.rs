@@ -569,7 +569,7 @@ impl PostgresRepository {
     }
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
-        let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i16, Option<String>, chrono::DateTime<Utc>)>(
+        let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, chrono::DateTime<Utc>)>(
             "SELECT id, package_id, publisher_id, rating, comment, created_at FROM reviews WHERE package_id = $1 ORDER BY created_at DESC"
         )
         .bind(package_id)
@@ -583,7 +583,7 @@ impl PostgresRepository {
                 id: r.0,
                 package_id: r.1,
                 reviewer_id: r.2,
-                rating: r.3,
+                rating: r.3 as i16,
                 comment: r.4,
                 created_at: r.5,
             })
