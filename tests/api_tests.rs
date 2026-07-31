@@ -43,6 +43,9 @@ fn valid_pkg(id: impl Into<String>) -> Package {
         ),
         homepage: None,
         tags: vec!["test".into()],
+        yanked: false,
+        provenance: None,
+        deprecated: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

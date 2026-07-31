@@ -30,6 +30,10 @@ pub enum PalaceErrorCode {
     InsecureUrl,
     TooLarge,
     Timeout,
+    /// Package version is yanked and no longer installable.
+    PackageYanked,
+    /// Attempt to modify an immutable package version.
+    ImmutableVersion,
 }
 
 /// Public JSON error body.
@@ -68,7 +72,9 @@ impl PalaceError {
             | PalaceErrorCode::HashMismatch
             | PalaceErrorCode::ArtifactNotAllowed
             | PalaceErrorCode::InsecureUrl => StatusCode::FORBIDDEN,
-            PalaceErrorCode::NotFound => StatusCode::NOT_FOUND,
+            PalaceErrorCode::NotFound
+            | PalaceErrorCode::PackageYanked
+            | PalaceErrorCode::ImmutableVersion => StatusCode::NOT_FOUND,
             PalaceErrorCode::Conflict => StatusCode::CONFLICT,
             PalaceErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             PalaceErrorCode::NotImplemented => StatusCode::NOT_IMPLEMENTED,

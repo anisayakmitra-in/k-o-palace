@@ -4,8 +4,10 @@ use crate::{
     artifact::ArtifactStorage,
     config::PalaceConfig,
     models::Package,
+    rate_limit::RateLimiters,
     repository::{memory::InMemoryRepository, PackageRepository},
 };
+use std::sync::Arc;
 
 /// Application state shared by all request handlers.
 #[derive(Clone)]
@@ -13,6 +15,7 @@ pub struct AppState {
     pub config: PalaceConfig,
     pub repo: PackageRepository,
     pub storage: ArtifactStorage,
+    pub rate_limiters: Arc<RateLimiters>,
 }
 
 impl AppState {
@@ -20,10 +23,12 @@ impl AppState {
     pub fn in_memory(config: PalaceConfig) -> Self {
         let repo = PackageRepository::Memory(InMemoryRepository::new());
         let storage = ArtifactStorage::from_config(&config);
+        let rate_limiters = Arc::new(RateLimiters::from_config(&config));
         Self {
             config,
             repo,
             storage,
+            rate_limiters,
         }
     }
 
@@ -73,6 +78,9 @@ fn sample_packages() -> Vec<Package> {
             repository: Some("https://github.com/openpandora/browser-gene".into()),
             homepage: None,
             tags: vec!["browser".into(), "automation".into(), "multimodal".into()],
+            yanked: false,
+            provenance: None,
+            deprecated: None,
             created_at: now,
             updated_at: now,
         },
@@ -105,6 +113,9 @@ fn sample_packages() -> Vec<Package> {
             repository: Some("https://github.com/openpandora/filesystem-gene".into()),
             homepage: None,
             tags: vec!["filesystem".into(), "tool".into(), "infrastructure".into()],
+            yanked: false,
+            provenance: None,
+            deprecated: None,
             created_at: now,
             updated_at: now,
         },

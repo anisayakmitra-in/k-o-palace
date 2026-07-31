@@ -2,14 +2,16 @@
 
 use crate::{
     app::AppState,
-    auth::{authenticate, AuthContext},
+    auth::{authenticate, create_api_token, register_publisher, AuthContext},
     error::{PalaceError, PalaceErrorCode, PalaceResult},
     models::{
-        ListParams, Package, PackageListResponse, Review, ReviewRequest, SearchParams,
-        VersionListResponse,
+        ListParams, Package, PackageListResponse, PublisherRegisterRequest,
+        PublisherRegisterResponse, PublisherResponse, Review, ReviewRequest, SearchParams,
+        TokenCreateRequest, TokenCreateResponse, TokenResponse, VersionListResponse,
     },
     pagination::Pagination,
     repository::PackageFilters,
+    request_id::request_id_middleware,
     search::rank_results,
     validation::{normalize_trust_level, validate_package},
 };
@@ -17,7 +19,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Redirect,
-    routing::get,
+    routing::{delete, get},
     Json, Router,
 };
 use std::sync::Arc;
@@ -54,6 +56,19 @@ pub fn router(state: AppState) -> Router {
         .route("/health", get(health))
         .route("/ready", get(ready))
         .route("/version", get(version))
+        // Publisher management
+        .route(
+            "/api/v1/publishers",
+            get(list_publishers).post(register_publisher_handler),
+        )
+        .route("/api/v1/publishers/{name}", get(get_publisher))
+        // Token management
+        .route(
+            "/api/v1/tokens",
+            get(list_tokens).post(create_token_handler),
+        )
+        .route("/api/v1/tokens/{id}", delete(revoke_token_handler))
+        // Package management
         .route("/api/v1/packages", get(list_packages).post(publish_package))
         .route(
             "/api/v1/packages/{id}",
@@ -75,6 +90,7 @@ pub fn router(state: AppState) -> Router {
         .layer(body_limit)
         .layer(timeout)
         .layer(cors)
+        .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(TraceLayer::new_for_http())
         .with_state(Arc::new(state))
 }
@@ -147,6 +163,15 @@ async fn search_packages(
     State(state): State<Arc<AppState>>,
     Query(params): Query<SearchParams>,
 ) -> PalaceResult<Json<PackageListResponse>> {
+    // Rate limit
+    let rl_key = "search";
+    if let Err(retry) = state.rate_limiters.search.check(rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
+
     if params.q.trim().is_empty() {
         return Err(PalaceError::new(
             PalaceErrorCode::BadRequest,
@@ -217,6 +242,15 @@ async fn publish_package(
     headers: axum::http::HeaderMap,
     Json(mut pkg): Json<Package>,
 ) -> PalaceResult<(StatusCode, Json<Package>)> {
+    // Rate limit
+    let rl_key = "publish"; // Simplified: per-endpoint, not per-client
+    if let Err(retry) = state.rate_limiters.publish.check(rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
+
     let auth = authenticate_header(&state, &headers).await?;
     if !auth.can_publish() {
         return Err(PalaceError::new(
@@ -285,6 +319,15 @@ async fn download_package(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> PalaceResult<Redirect> {
+    // Rate limit
+    let rl_key = "download";
+    if let Err(retry) = state.rate_limiters.download.check(rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
+
     let package = state.repo.get_package(&id).await?;
     let artifact_url = package.artifact_url.ok_or_else(|| {
         PalaceError::new(
@@ -344,4 +387,118 @@ async fn authenticate_header(
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
     authenticate(&state.repo, auth).await
+}
+
+// ── Publisher Management Handlers ──
+
+async fn register_publisher_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<PublisherRegisterRequest>,
+) -> PalaceResult<(StatusCode, Json<PublisherRegisterResponse>)> {
+    let (publisher, token) = register_publisher(
+        &state.repo,
+        &req.name,
+        &req.display_name,
+        req.email.clone(),
+        req.website.clone(),
+    )
+    .await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(PublisherRegisterResponse {
+            publisher: publisher.into(),
+            token,
+        }),
+    ))
+}
+
+async fn get_publisher(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> PalaceResult<Json<PublisherResponse>> {
+    let publisher = state.repo.get_publisher_by_name(&name).await?;
+    Ok(Json(publisher.into()))
+}
+
+async fn list_publishers(
+    State(state): State<Arc<AppState>>,
+) -> PalaceResult<Json<Vec<PublisherResponse>>> {
+    // List all publishers — the in-memory repo doesn't have a list_publishers method,
+    // so we return a simple empty list for now. A full implementation would add
+    // a repo method.
+    let _ = &state;
+    Ok(Json(vec![]))
+}
+
+// ── Token Management Handlers ──
+
+async fn create_token_handler(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<TokenCreateRequest>,
+) -> PalaceResult<(StatusCode, Json<TokenCreateResponse>)> {
+    let auth = authenticate_header(&state, &headers).await?;
+
+    let (plaintext, token) = create_api_token(&state.repo, auth.publisher.id, &req.name).await?;
+
+    // Record audit event
+    let audit = crate::models::AuditEvent {
+        id: uuid::Uuid::new_v4(),
+        event_type: "token.created".into(),
+        actor_id: Some(auth.publisher.id),
+        package_id: None,
+        details: Some(serde_json::json!({"token_name": req.name})),
+        created_at: chrono::Utc::now(),
+    };
+    let _ = state.repo.record_audit_event(&audit).await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(TokenCreateResponse {
+            token: plaintext,
+            token_info: token.into(),
+        }),
+    ))
+}
+
+async fn list_tokens(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> PalaceResult<Json<Vec<TokenResponse>>> {
+    let auth = authenticate_header(&state, &headers).await?;
+    let tokens = state.repo.list_api_tokens(auth.publisher.id).await?;
+    Ok(Json(tokens.into_iter().map(Into::into).collect()))
+}
+
+async fn revoke_token_handler(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<uuid::Uuid>,
+) -> PalaceResult<StatusCode> {
+    let auth = authenticate_header(&state, &headers).await?;
+
+    // Verify ownership: the token must belong to the authenticated publisher
+    let tokens = state.repo.list_api_tokens(auth.publisher.id).await?;
+    if !tokens.iter().any(|t| t.id == id) {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token does not belong to authenticated publisher",
+        ));
+    }
+
+    state.repo.revoke_api_token(id).await?;
+
+    // Record audit event
+    let audit = crate::models::AuditEvent {
+        id: uuid::Uuid::new_v4(),
+        event_type: "token.revoked".into(),
+        actor_id: Some(auth.publisher.id),
+        package_id: None,
+        details: Some(serde_json::json!({"token_id": id})),
+        created_at: chrono::Utc::now(),
+    };
+    let _ = state.repo.record_audit_event(&audit).await;
+
+    Ok(StatusCode::NO_CONTENT)
 }

@@ -150,6 +150,16 @@ impl PackageRepository {
     pub async fn record_audit_event(&self, event: &AuditEvent) -> PalaceResult<()> {
         dispatch!(self, record_audit_event, event)
     }
+
+    /// Yank a package version (mark as not installable without deleting).
+    pub async fn yank_package(&self, id: &str, version: &str) -> PalaceResult<()> {
+        dispatch!(self, yank_package, id, version)
+    }
+
+    /// Unyank a package version (restore installability).
+    pub async fn unyank_package(&self, id: &str, version: &str) -> PalaceResult<()> {
+        dispatch!(self, unyank_package, id, version)
+    }
 }
 
 #[derive(Debug, Default, Clone)]

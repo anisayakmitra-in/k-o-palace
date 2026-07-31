@@ -91,6 +91,9 @@ async fn moderator_can_transition_trust() {
         artifact_url: None,
         homepage: None,
         tags: vec![],
+        yanked: false,
+        provenance: None,
+        deprecated: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };

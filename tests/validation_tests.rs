@@ -100,6 +100,9 @@ fn valid_package() -> Package {
         artifact_url: None,
         homepage: None,
         tags: vec![],
+        yanked: false,
+        provenance: None,
+        deprecated: None,
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }

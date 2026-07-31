@@ -332,4 +332,34 @@ impl InMemoryRepository {
         list.push(event.clone());
         Ok(())
     }
+
+    pub async fn yank_package(&self, id: &str, version: &str) -> PalaceResult<()> {
+        let mut map = self.packages.write().await;
+        let versions = map
+            .get_mut(id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        let pkg = versions
+            .iter_mut()
+            .find(|p| p.version == version)
+            .ok_or_else(|| {
+                PalaceError::new(PalaceErrorCode::NotFound, "package version not found")
+            })?;
+        pkg.yanked = true;
+        Ok(())
+    }
+
+    pub async fn unyank_package(&self, id: &str, version: &str) -> PalaceResult<()> {
+        let mut map = self.packages.write().await;
+        let versions = map
+            .get_mut(id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        let pkg = versions
+            .iter_mut()
+            .find(|p| p.version == version)
+            .ok_or_else(|| {
+                PalaceError::new(PalaceErrorCode::NotFound, "package version not found")
+            })?;
+        pkg.yanked = false;
+        Ok(())
+    }
 }

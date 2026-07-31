@@ -25,6 +25,15 @@ pub struct Package {
     pub artifact_url: Option<String>,
     pub homepage: Option<String>,
     pub tags: Vec<String>,
+    /// Whether this package version has been yanked (hidden from install but not deleted).
+    #[serde(default)]
+    pub yanked: bool,
+    /// Optional deprecation message (set when a package is deprecated).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deprecated: Option<String>,
+    /// Git forge provenance metadata (commit SHA, tag, release ID).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<Provenance>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -398,4 +407,111 @@ pub struct VersionInfo {
     pub created_at: DateTime<Utc>,
     pub artifact_url: Option<String>,
     pub content_hash: Option<String>,
+}
+
+// ── Publisher Management API Types ──
+
+/// Request body for publisher registration.
+#[derive(Debug, Deserialize)]
+pub struct PublisherRegisterRequest {
+    pub name: String,
+    pub display_name: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub website: Option<String>,
+}
+
+/// Public publisher response (no sensitive data).
+#[derive(Debug, Serialize)]
+pub struct PublisherResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub display_name: String,
+    pub email: Option<String>,
+    pub website: Option<String>,
+    pub role: String,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<Publisher> for PublisherResponse {
+    fn from(p: Publisher) -> Self {
+        Self {
+            id: p.id,
+            name: p.name,
+            display_name: p.display_name,
+            email: p.email,
+            website: p.website,
+            role: p.role.as_str().to_string(),
+            created_at: p.created_at,
+        }
+    }
+}
+
+/// Response from publisher registration (includes token shown once).
+#[derive(Debug, Serialize)]
+pub struct PublisherRegisterResponse {
+    pub publisher: PublisherResponse,
+    pub token: String,
+}
+
+/// Request body for token creation.
+#[derive(Debug, Deserialize)]
+pub struct TokenCreateRequest {
+    pub name: String,
+    #[serde(default)]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// Public token response (never includes token_hash).
+#[derive(Debug, Serialize)]
+pub struct TokenResponse {
+    pub id: Uuid,
+    pub name: String,
+    pub created_at: DateTime<Utc>,
+    pub revoked_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl From<ApiToken> for TokenResponse {
+    fn from(t: ApiToken) -> Self {
+        Self {
+            id: t.id,
+            name: t.name,
+            created_at: t.created_at,
+            revoked_at: t.revoked_at,
+            expires_at: t.expires_at,
+        }
+    }
+}
+
+/// Response from token creation (includes plaintext token shown once).
+#[derive(Debug, Serialize)]
+pub struct TokenCreateResponse {
+    pub token: String,
+    pub token_info: TokenResponse,
+}
+
+/// Git forge provenance for a package version.
+/// Captures immutable source identity — never use branch names as provenance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Provenance {
+    /// Forge type: "github", "gitlab", "codeberg", "forgejo", "gitea", "git"
+    pub forge: String,
+    /// Full repository URL (HTTPS)
+    pub repository_url: String,
+    /// Repository owner/org
+    pub owner: String,
+    /// Repository name
+    pub repo: String,
+    /// Immutable commit SHA (never a branch name)
+    pub commit_sha: String,
+    /// Git tag if published from a tag
+    pub tag: Option<String>,
+    /// GitHub release ID if applicable
+    pub release_id: Option<String>,
+    /// Path to manifest file in the repository
+    pub manifest_path: Option<String>,
+    /// Digest of the manifest content
+    pub manifest_digest: Option<String>,
 }
