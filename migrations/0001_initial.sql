@@ -1,6 +1,8 @@
 -- K-O Palace initial schema
 -- Publishers, API tokens, packages, versions, manifests, artifacts, signatures, reviews, downloads, audit events
 
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
+
 CREATE TABLE IF NOT EXISTS publishers (
     id          UUID PRIMARY KEY,
     name        VARCHAR(64) UNIQUE NOT NULL,
