@@ -262,6 +262,7 @@ async fn publish_package(
     validate_package(&pkg)?;
 
     pkg.trust.level = normalize_trust_level(Some(pkg.trust.level.as_str()));
+    pkg.author = auth.publisher.name.clone();
     pkg.trust.publisher = auth.publisher.name.clone();
 
     if !auth.owns(&pkg.trust.publisher) {
@@ -291,6 +292,7 @@ async fn update_package(
     }
 
     validate_package(&pkg)?;
+    pkg.author = existing.author.clone();
     pkg.trust.publisher = existing.trust.publisher.clone();
     pkg.trust.level = existing.trust.level.clone();
     pkg.id = id;

@@ -33,7 +33,7 @@ The current migrations and SQL adapter are not aligned:
 - `reviews` is migrated with `publisher_id`, while the adapter queries `reviewer_id`.
 - `audit_events` is migrated with `target_type`, `target_id`, and `metadata`, while the adapter queries `package_id` and `details`.
 - The `reviews` and `trust_transitions` foreign keys reference `packages(id)`, but the package key is `(id, version)`. Those references need a valid unique target or a composite foreign key.
-- The package table has `publisher_id`, but the adapter does not write or read it. Package responses reconstruct the publisher from the user-supplied `author` field.
+- The package table has `publisher_id`, but the adapter does not write or read it. The HTTP publish path stores the authenticated publisher in `author` as a temporary ownership representation.
 
 These discrepancies require migration repair and real PostgreSQL integration tests before PostgreSQL can be advertised as usable.
 

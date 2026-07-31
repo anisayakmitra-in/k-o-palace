@@ -188,3 +188,34 @@ async fn pagination_total_is_accurate() {
     assert_eq!(list.limit, 2);
     assert_eq!(list.offset, 0);
 }
+
+#[tokio::test]
+async fn authenticated_publish_uses_the_authenticated_publisher_as_author() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let app = router(state);
+    let mut pkg = valid_pkg("owner/package");
+    pkg.author = "client-supplied-author".into();
+    pkg.trust.publisher = "client-supplied-publisher".into();
+
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&pkg).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let package: Package = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(package.author, publisher.name);
+    assert_eq!(package.trust.publisher, publisher.name);
+}
