@@ -260,6 +260,49 @@ impl PostgresRepository {
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
     }
 
+    pub async fn create_api_token_with_audit(
+        &self,
+        token: &ApiToken,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(token.id)
+        .bind(token.publisher_id)
+        .bind(&token.token_hash)
+        .bind(&token.name)
+        .bind(token.created_at)
+        .bind(token.revoked_at)
+        .bind(token.expires_at)
+        .bind(serde_json::to_value(&token.scopes).unwrap_or_default())
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(event.id)
+        .bind(&event.event_type)
+        .bind(event.actor_id)
+        .bind("token")
+        .bind(token.id.to_string())
+        .bind(event.details.clone().unwrap_or_else(|| serde_json::json!({})))
+        .bind(event.created_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+    }
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
         let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
             "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE revoked_at IS NULL"
@@ -326,6 +369,45 @@ impl PostgresRepository {
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
     }
 
+    pub async fn revoke_api_token_with_audit(
+        &self,
+        id: Uuid,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        let result = sqlx::query("UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "token not found",
+            ));
+        }
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(event.id)
+        .bind(&event.event_type)
+        .bind(event.actor_id)
+        .bind("token")
+        .bind(id.to_string())
+        .bind(event.details.clone().unwrap_or_else(|| serde_json::json!({})))
+        .bind(event.created_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+    }
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
         let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
             "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC"

@@ -132,9 +132,7 @@ fn validate_scopes(scopes: &[String]) -> PalaceResult<Vec<String>> {
     Ok(normalized)
 }
 
-/// Generate a token with explicit lifecycle and scope controls.
-pub async fn create_api_token_with_options(
-    repo: &crate::repository::PackageRepository,
+fn prepare_api_token(
     publisher_id: Uuid,
     name: impl Into<String>,
     expires_at: Option<chrono::DateTime<Utc>>,
@@ -166,7 +164,33 @@ pub async fn create_api_token_with_options(
         expires_at,
         scopes,
     };
+    Ok((plaintext, token))
+}
+
+/// Generate a token with explicit lifecycle and scope controls.
+pub async fn create_api_token_with_options(
+    repo: &crate::repository::PackageRepository,
+    publisher_id: Uuid,
+    name: impl Into<String>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    scopes: Vec<String>,
+) -> PalaceResult<(String, ApiToken)> {
+    let (plaintext, token) = prepare_api_token(publisher_id, name, expires_at, scopes)?;
     repo.create_api_token(&token).await?;
+    Ok((plaintext, token))
+}
+
+/// Generate a token and persist it with its audit event atomically where supported.
+pub async fn create_api_token_with_options_and_audit(
+    repo: &crate::repository::PackageRepository,
+    publisher_id: Uuid,
+    name: impl Into<String>,
+    expires_at: Option<chrono::DateTime<Utc>>,
+    scopes: Vec<String>,
+    audit: &crate::models::AuditEvent,
+) -> PalaceResult<(String, ApiToken)> {
+    let (plaintext, token) = prepare_api_token(publisher_id, name, expires_at, scopes)?;
+    repo.create_api_token_with_audit(&token, audit).await?;
     Ok((plaintext, token))
 }
 

@@ -114,6 +114,15 @@ impl InMemoryRepository {
         Ok(())
     }
 
+    pub async fn create_api_token_with_audit(
+        &self,
+        token: &ApiToken,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        self.create_api_token(token).await?;
+        self.record_audit_event(event).await
+    }
+
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
         let map = self.tokens.read().await;
         map.values()
@@ -134,6 +143,15 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "token not found"))?;
         token.revoked_at = Some(Utc::now());
         Ok(())
+    }
+
+    pub async fn revoke_api_token_with_audit(
+        &self,
+        id: Uuid,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        self.revoke_api_token(id).await?;
+        self.record_audit_event(event).await
     }
     pub async fn get_api_token_by_id(&self, id: Uuid) -> PalaceResult<ApiToken> {
         let map = self.tokens.read().await;

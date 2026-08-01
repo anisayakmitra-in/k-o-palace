@@ -3,7 +3,7 @@
 use crate::{
     app::AppState,
     auth::{
-        authenticate, create_api_token_with_options, register_publisher, AuthContext,
+        authenticate, create_api_token_with_options_and_audit, register_publisher, AuthContext,
         DEFAULT_PUBLISHER_SCOPES,
     },
     error::{PalaceError, PalaceErrorCode, PalaceResult},
@@ -602,16 +602,6 @@ async fn create_token_handler(
             "only moderators can issue moderation tokens",
         ));
     }
-    let (plaintext, token) = create_api_token_with_options(
-        &state.repo,
-        auth.publisher.id,
-        &req.name,
-        req.expires_at,
-        scopes,
-    )
-    .await?;
-
-    // Record audit event
     let audit = crate::models::AuditEvent {
         id: uuid::Uuid::new_v4(),
         event_type: "token.created".into(),
@@ -620,7 +610,15 @@ async fn create_token_handler(
         details: Some(serde_json::json!({"token_name": req.name})),
         created_at: chrono::Utc::now(),
     };
-    let _ = state.repo.record_audit_event(&audit).await;
+    let (plaintext, token) = create_api_token_with_options_and_audit(
+        &state.repo,
+        auth.publisher.id,
+        &req.name,
+        req.expires_at,
+        scopes,
+        &audit,
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -656,9 +654,6 @@ async fn revoke_token_handler(
         ));
     }
 
-    state.repo.revoke_api_token(id).await?;
-
-    // Record audit event
     let audit = crate::models::AuditEvent {
         id: uuid::Uuid::new_v4(),
         event_type: "token.revoked".into(),
@@ -667,7 +662,7 @@ async fn revoke_token_handler(
         details: Some(serde_json::json!({"token_id": id})),
         created_at: chrono::Utc::now(),
     };
-    let _ = state.repo.record_audit_event(&audit).await;
+    state.repo.revoke_api_token_with_audit(id, &audit).await?;
 
     Ok(StatusCode::NO_CONTENT)
 }

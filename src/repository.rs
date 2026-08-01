@@ -66,6 +66,14 @@ impl PackageRepository {
         dispatch!(self, create_api_token, token)
     }
 
+    pub async fn create_api_token_with_audit(
+        &self,
+        token: &ApiToken,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        dispatch!(self, create_api_token_with_audit, token, event)
+    }
+
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
         dispatch!(self, get_api_token_by_plaintext, plaintext)
     }
@@ -75,6 +83,14 @@ impl PackageRepository {
 
     pub async fn revoke_api_token(&self, id: Uuid) -> PalaceResult<()> {
         dispatch!(self, revoke_api_token, id)
+    }
+
+    pub async fn revoke_api_token_with_audit(
+        &self,
+        id: Uuid,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        dispatch!(self, revoke_api_token_with_audit, id, event)
     }
     pub async fn touch_api_token(&self, id: Uuid) -> PalaceResult<()> {
         dispatch!(self, touch_api_token, id)
