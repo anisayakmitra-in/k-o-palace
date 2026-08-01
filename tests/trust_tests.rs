@@ -108,15 +108,15 @@ async fn moderator_can_transition_trust() {
         &repo,
         &ctx,
         "test.gene",
-        TrustLevel::Verified,
+        TrustLevel::Community,
         Some("reviewed".into()),
     )
     .await
     .unwrap();
-    assert_eq!(transition.to_level, "verified");
+    assert_eq!(transition.to_level, "community");
     assert_eq!(
         repo.get_package("test.gene").await.unwrap().trust.level,
-        TrustLevel::Verified
+        TrustLevel::Community
     );
 }
 
@@ -189,7 +189,7 @@ async fn trust_transition_updates_all_versions_in_memory() {
         &repo,
         &ctx,
         "versions.gene",
-        TrustLevel::Verified,
+        TrustLevel::Community,
         Some("reviewed".into()),
     )
     .await
@@ -201,7 +201,7 @@ async fn trust_transition_updates_all_versions_in_memory() {
             .unwrap()
             .trust
             .level,
-        TrustLevel::Verified
+        TrustLevel::Community
     );
     assert_eq!(
         repo.get_package_version("versions.gene", "2.0.0")
@@ -209,7 +209,7 @@ async fn trust_transition_updates_all_versions_in_memory() {
             .unwrap()
             .trust
             .level,
-        TrustLevel::Verified
+        TrustLevel::Community
     );
 }
 #[tokio::test]
@@ -315,16 +315,22 @@ async fn server_assigned_trust_requires_verified_publisher() {
         k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
     );
 
-    let transition = transition_trust(
+    let evidence_rejected = transition_trust(
         &repo,
         &context,
         "owned.gene",
         TrustLevel::Verified,
-        Some("approved".into()),
+        Some("artifact evidence required".into()),
     )
     .await
-    .unwrap();
-    assert_eq!(transition.to_level, "verified");
+    .unwrap_err();
+    assert_eq!(
+        evidence_rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+    assert!(evidence_rejected
+        .message
+        .contains("server-recorded artifact"));
 
     let mut orphan = package.clone();
     orphan.id = "orphaned.gene".into();
@@ -346,4 +352,94 @@ async fn server_assigned_trust_requires_verified_publisher() {
         orphan_rejected.code,
         k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
     );
+}
+
+#[tokio::test]
+async fn server_assigned_trust_rejects_client_supplied_signature_metadata() {
+    use k_o_palace::models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind};
+    use k_o_palace::repository::{memory::InMemoryRepository, PackageRepository};
+
+    let repo = PackageRepository::Memory(InMemoryRepository::new());
+    let owner = Publisher {
+        id: Uuid::new_v4(),
+        name: "signed-owner".into(),
+        display_name: "Signed Owner".into(),
+        email: None,
+        website: None,
+        role: Role::Publisher,
+        created_at: Utc::now(),
+    };
+    let moderator = Publisher {
+        id: Uuid::new_v4(),
+        name: "signed-moderator".into(),
+        display_name: "Signed Moderator".into(),
+        email: None,
+        website: None,
+        role: Role::Moderator,
+        created_at: Utc::now(),
+    };
+    repo.create_publisher(&owner).await.unwrap();
+    repo.create_publisher(&moderator).await.unwrap();
+    repo.set_publisher_verification(&PublisherVerification {
+        publisher_id: owner.id,
+        verified: true,
+        verified_at: Some(Utc::now()),
+        verified_by: Some(moderator.id),
+        reason: Some("publisher identity verified".into()),
+    })
+    .await
+    .unwrap();
+
+    let package = Package {
+        id: "metadata-only.gene".into(),
+        name: "Metadata Only".into(),
+        version: "1.0.0".into(),
+        kind: PackageKind::Gene,
+        description: "client supplied trust metadata".into(),
+        author: owner.name.clone(),
+        license: "MIT".into(),
+        trust: TrustInfo {
+            level: TrustLevel::Experimental,
+            signature: Some("client-supplied-signature".into()),
+            public_key: Some("client-supplied-public-key".into()),
+            content_hash: Some("sha256:client-supplied-hash".into()),
+            publisher: owner.name.clone(),
+        },
+        capabilities: CapabilityInfo::default(),
+        downloads: 0,
+        success_rate: 0.0,
+        compatibility: CompatibilityInfo::default(),
+        repository: None,
+        artifact_url: Some("https://example.com/metadata-only.tar.gz".into()),
+        homepage: None,
+        tags: vec![],
+        yanked: false,
+        deprecated: None,
+        provenance: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    repo.publish_package(&package).await.unwrap();
+
+    let context = AuthContext {
+        publisher: moderator,
+        token_id: Uuid::new_v4(),
+        scopes: vec!["moderation:write".into()],
+    };
+    let rejected = transition_trust_with_policy(
+        &repo,
+        &context,
+        &package.id,
+        TrustLevel::Verified,
+        Some("metadata is not evidence".into()),
+        true,
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(
+        rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+    assert!(rejected.message.contains("server-recorded artifact"));
 }
