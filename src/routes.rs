@@ -28,15 +28,16 @@ use axum::{
     http::{header, HeaderName, HeaderValue},
 };
 use axum::{
-    extract::{Path, Query, State},
+    extract::{connect_info::ConnectInfo, Path, Query, Request, State},
     http::StatusCode,
+    middleware::Next,
     response::Response,
     routing::{delete, get, patch, post},
     Json, Router,
 };
 use chrono::Utc;
-use std::sync::Arc;
 use std::time::Duration;
+use std::{net::SocketAddr, sync::Arc};
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     limit::RequestBodyLimitLayer,
@@ -73,6 +74,34 @@ fn publisher_rate_limit_key(auth: &AuthContext, namespace: &str) -> String {
     )
 }
 
+async fn read_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> PalaceResult<Response> {
+    let connect_info: Option<ConnectInfo<SocketAddr>> = request
+        .extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .copied();
+    let path = request.uri().path();
+    if request.method() == axum::http::Method::GET
+        && (path == "/api/v1" || path.starts_with("/api/v1/"))
+    {
+        let identity = connect_info
+            .map(|ConnectInfo(peer)| format!("peer:{}", peer.ip()))
+            .unwrap_or_else(|| "anonymous".into());
+        let key = format!("read:{}", crate::security::sha256_hex(identity.as_bytes()));
+        if let Err(retry) = state.rate_limiters.read.check(&key).await {
+            return Err(PalaceError::new(
+                PalaceErrorCode::RateLimited,
+                format!("rate limit exceeded, retry after {retry}s"),
+            ));
+        }
+    }
+
+    Ok(next.run(request).await)
+}
+
 #[cfg(feature = "reqwest")]
 fn download_dedupe_key(headers: &axum::http::HeaderMap, trust_forwarded: bool) -> String {
     let rate_key = rate_limit_key(headers, "download", trust_forwarded);
@@ -103,6 +132,8 @@ pub fn router(state: AppState) -> Router {
         axum::http::StatusCode::REQUEST_TIMEOUT,
         Duration::from_secs(state.config.security.request_timeout_secs),
     );
+
+    let state = Arc::new(state);
 
     Router::new()
         .route("/health", get(health))
@@ -157,7 +188,11 @@ pub fn router(state: AppState) -> Router {
         .layer(cors)
         .layer(axum::middleware::from_fn(request_id_middleware))
         .layer(TraceLayer::new_for_http())
-        .with_state(Arc::new(state))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            read_rate_limit_middleware,
+        ))
+        .with_state(state)
 }
 
 async fn health(State(state): State<Arc<AppState>>) -> StatusCode {
@@ -288,7 +323,11 @@ async fn list_versions(
     let versions = state.repo.list_versions(&id).await?;
     Ok(Json(VersionListResponse {
         total: versions.len(),
-        versions: versions.into_iter().map(|v| v.version).collect(),
+        versions: versions
+            .into_iter()
+            .take(crate::pagination::MAX_LIMIT)
+            .map(|v| v.version)
+            .collect(),
     }))
 }
 
@@ -539,12 +578,25 @@ async fn transition_package_trust(
     Json(req): Json<TrustTransitionRequest>,
 ) -> PalaceResult<Json<crate::models::TrustTransition>> {
     let auth = authenticate_header(&state, &headers).await?;
+    let reason = req
+        .reason
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if reason
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 500)
+    {
+        return Err(PalaceError::new(
+            PalaceErrorCode::ValidationFailed,
+            "trust transition reason must be 500 characters or fewer",
+        ));
+    }
     let transition = transition_trust_with_policy(
         &state.repo,
         &auth,
         &id,
         req.level,
-        req.reason,
+        reason,
         state
             .config
             .registry
