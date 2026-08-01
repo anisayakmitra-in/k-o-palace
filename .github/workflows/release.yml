@@ -21,6 +21,8 @@ jobs:
   verify:
     name: Verify release source
     runs-on: ubuntu-latest
+    outputs:
+      release_commit: ${{ steps.release_source.outputs.commit }}
     services:
       postgres:
         image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
@@ -36,21 +38,26 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - name: Validate release tag
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fetch origin/main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: Verify tag source and package version
+        id: release_source
         env:
           VERSION: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          if [[ ! "$VERSION" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "invalid release tag: $VERSION" >&2
-            exit 1
-          fi
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
-        with:
-          ref: ${{ inputs.tag || github.ref }}
-          persist-credentials: false
+          bash scripts/verify-release-source.sh "$VERSION"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
       - name: Verify release packaging helpers
         run: bash scripts/test-release-packaging.sh
+      - name: Verify release gates
+        run: bash scripts/test-release-gates.sh
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -109,7 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.release_commit }}
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -157,7 +164,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: release-${{ matrix.target }}
-          path: dist/*
+          path: dist/k-o-palace-*
           if-no-files-found: error
 
   sbom:
@@ -167,7 +174,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.verify.outputs.release_commit }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
@@ -189,13 +196,27 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [build, sbom]
+    needs: [verify, build, sbom]
     runs-on: ubuntu-latest
     permissions:
       contents: write
       id-token: write
       attestations: write
     steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.verify.outputs.release_commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fetch origin/main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: Reverify release source
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-source.sh "$VERSION"
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
           pattern: release-*
@@ -213,6 +234,8 @@ jobs:
         run: |
           set -euo pipefail
           cat -- *.sha256 | sort > "k-o-palace-$VERSION-SHA256SUMS.txt"
+      - name: Verify every release checksum sidecar
+        run: bash scripts/verify-release-checksums.sh dist
       - name: Attest release artifacts
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2
         with:

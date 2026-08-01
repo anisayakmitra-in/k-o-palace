@@ -15,6 +15,7 @@ services:
       retries: 5
 
   palace:
+    image: k-o-palace:local
     build: .
     restart: unless-stopped
     depends_on:
@@ -22,13 +23,29 @@ services:
         condition: service_healthy
     environment:
       DATABASE_URL: postgres://kopalace:change-me@postgres:5432/kopalace
-      PALACE_BIND: 0.0.0.0:3001
-      PALACE_PUBLIC_URL: http://localhost:3001
-      PALACE_REQUIRE_HTTPS: "false"
-      PALACE_CORS_ORIGINS: http://localhost:3001
+      PALACE_BIND: 127.0.0.1:3001
+      PALACE_PUBLIC_URL: http://127.0.0.1:3001
+      PALACE_CORS_ORIGINS: http://127.0.0.1:3001
       PALACE_DB_MAX_CONNECTIONS: "10"
+      PALACE_TRUST_PROXY_HEADERS: "false"
+      PALACE_TRUSTED_PROXY_IPS: ""
+      PALACE_BEHIND_TLS_PROXY: "false"
+      PALACE_REPLICA_COUNT: "1"
     ports:
-      - "3001:3001"
+      - "127.0.0.1:3001:3000"
+
+  loopback-relay:
+    image: k-o-palace:local
+    build: .
+    restart: unless-stopped
+    depends_on:
+      palace:
+        condition: service_healthy
+    network_mode: service:palace
+    entrypoint:
+      - socat
+      - TCP-LISTEN:3000,fork,reuseaddr
+      - TCP:127.0.0.1:3001
 
 volumes:
   postgres-data:

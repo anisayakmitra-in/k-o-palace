@@ -40,6 +40,9 @@ jobs:
       - name: Verify release packaging helpers
         run: bash scripts/test-release-packaging.sh
 
+      - name: Verify release gates
+        run: bash scripts/test-release-gates.sh
+
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
@@ -176,10 +179,45 @@ jobs:
           path: "*.cdx.json"
           if-no-files-found: error
 
+  container:
+    name: Container Deployment
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+
+      - name: Build pinned container image
+        run: docker build --tag k-o-palace:local .
+
+      - name: Smoke test local Compose deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+          cleanup() {
+            status=$?
+            docker compose logs --no-color
+            docker compose down --volumes
+            exit "$status"
+          }
+          trap cleanup EXIT
+          docker compose up --detach --no-build
+          for attempt in {1..60}; do
+            if curl --fail --silent --show-error http://127.0.0.1:3001/health; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "Compose health check did not become ready" >&2
+          exit 1
+
   release-gates:
     name: Release Gates
     if: always()
-    needs: [validate, web, build, migration-verify, sbom]
+    needs: [validate, web, build, migration-verify, sbom, container]
     runs-on: ubuntu-latest
     steps:
       - name: Require every gate to pass
@@ -191,6 +229,7 @@ jobs:
             "build=${{ needs.build.result }}"
             "migration-verify=${{ needs.migration-verify.result }}"
             "sbom=${{ needs.sbom.result }}"
+            "container=${{ needs.container.result }}"
           )
           for result in "${results[@]}"; do
             echo "$result"

@@ -50,7 +50,9 @@ For a local PostgreSQL-backed deployment:
 docker compose up --build
 ```
 
-Change the example database password before exposing the service. Public deployments should provide secrets through the platform secret manager, terminate TLS at a trusted proxy, set explicit CORS origins, and configure backups for the PostgreSQL volume.
+The Compose deployment is intentionally local-only: it publishes `http://127.0.0.1:3001` and does not claim to terminate TLS. The application itself remains bound to loopback; a same-image relay makes that loopback listener reachable only through the host loopback port.
+
+Do not expose this Compose stack directly to a public network. Production deployments must provide secrets through the platform secret manager, terminate TLS at a trusted reverse proxy, set `PALACE_BEHIND_TLS_PROXY=true`, use an HTTPS `PALACE_PUBLIC_URL`, keep `PALACE_REPLICA_COUNT=1` while rate limiting is process-local, set explicit CORS origins, and configure PostgreSQL backups.
 ## Web Client
 
 The standalone React and Vite client provides discovery and trust review without executing packages.
@@ -97,7 +99,10 @@ cargo run --no-default-features
 | `PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE` | `240` | Download requests per minute per limiter key |
 | `PALACE_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Authentication and registration requests per minute per limiter key |
 | `PALACE_RATE_LIMIT_RESOLVE_PER_MINUTE` | `60` | Dependency resolution requests per minute per limiter key |
-| `PALACE_REQUIRE_HTTPS` | `true` | Require an HTTPS public URL when binding beyond localhost |
+| `PALACE_TRUST_PROXY_HEADERS` | `false` | Trust the first `X-Forwarded-For` address only when the direct peer is exactly allowlisted; startup requires a non-empty proxy allowlist when enabled |
+| `PALACE_TRUSTED_PROXY_IPS` | (empty) | Comma-separated exact IP addresses of trusted direct proxy peers; hostnames and CIDR ranges are rejected |
+| `PALACE_BEHIND_TLS_PROXY` | `false` | Must be `true` when binding beyond loopback; the trusted reverse proxy must terminate TLS |
+| `PALACE_REPLICA_COUNT` | `1` | Must remain `1` while rate limiting is process-local |
 
 ## PostgreSQL Setup
 
@@ -176,7 +181,7 @@ Artifacts must be served over HTTPS from an allowlisted host. Default allowed ho
 - `github.com`
 - `objects.githubusercontent.com`
 
-Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND` (`local` or `github`; other values fail startup), `PALACE_ALLOW_PUBLIC_REGISTRATION` (disabled by default), `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, and `PALACE_TRUST_PROXY_HEADERS`. Forwarded headers must only be enabled behind a proxy that overwrites them.
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND` (`local` or `github`; other values fail startup), `PALACE_ALLOW_PUBLIC_REGISTRATION` (disabled by default), `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, `PALACE_TRUST_PROXY_HEADERS`, and `PALACE_TRUSTED_PROXY_IPS`. Anonymous rate-limit and download-dedupe keys use the direct peer IP unless proxy-header trust is enabled and that peer is in the exact-IP allowlist; only the first valid `X-Forwarded-For` address is then used.
 
 API tokens can request `packages:read`, `packages:publish`, `packages:write`, `tokens:manage`, `moderation:write`, or `admin:write` scopes and may include an `expires_at` timestamp. New tokens are addressable by their token ID; older tokens continue through the compatibility verifier.
 
@@ -195,10 +200,14 @@ DATABASE_URL=postgres://user:pass@localhost:5432/kopalace \
   ./target/release/k-o-palace
 ```
 
-For public deployment, set:
+For public deployment, place K-O Palace behind a trusted TLS-terminating reverse proxy and set:
 - `PALACE_BIND=0.0.0.0:3001`
 - `PALACE_PUBLIC_URL=https://registry.example.com`
 - `PALACE_CORS_ORIGINS=https://app.example.com`
+- `PALACE_BEHIND_TLS_PROXY=true`
+- `PALACE_REPLICA_COUNT=1`
+
+A non-loopback bind always requires both `PALACE_BEHIND_TLS_PROXY=true` and an HTTPS public URL; there is no HTTP opt-out for that startup check.
 
 ## Pandora CLI Integration
 
