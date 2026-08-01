@@ -61,6 +61,7 @@ pub struct SecurityConfig {
     pub max_body_bytes: usize,
     pub request_timeout_secs: u64,
     pub trust_forwarded_headers: bool,
+    pub allow_public_registration: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +106,7 @@ impl Default for PalaceConfig {
                 max_body_bytes: 16 * 1024 * 1024,
                 request_timeout_secs: 30,
                 trust_forwarded_headers: false,
+                allow_public_registration: false,
             },
             registry: RegistryConfig {
                 seed_samples: false,
@@ -214,6 +216,10 @@ impl PalaceConfig {
             if let Ok(value) = value.parse() {
                 cfg.security.rate_limit_auth_per_minute = value;
             }
+        }
+        if let Ok(value) = std::env::var("PALACE_ALLOW_PUBLIC_REGISTRATION") {
+            cfg.security.allow_public_registration =
+                value == "1" || value.eq_ignore_ascii_case("true");
         }
         if let Ok(value) = std::env::var("PALACE_TRUST_PROXY_HEADERS") {
             cfg.security.trust_forwarded_headers =

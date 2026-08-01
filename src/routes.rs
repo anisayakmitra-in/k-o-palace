@@ -522,6 +522,12 @@ async fn register_publisher_handler(
     headers: axum::http::HeaderMap,
     Json(req): Json<PublisherRegisterRequest>,
 ) -> PalaceResult<(StatusCode, Json<PublisherRegisterResponse>)> {
+    if !state.config.security.allow_public_registration {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "public publisher registration is disabled; provision publishers through an operator",
+        ));
+    }
     let rl_key = rate_limit_key(
         &headers,
         "registration",

@@ -6,8 +6,24 @@ use k_o_palace::{app::AppState, config::PalaceConfig, routes::router};
 use tower::ServiceExt;
 
 fn test_state() -> AppState {
-    let config = PalaceConfig::default();
+    let mut config = PalaceConfig::default();
+    config.security.allow_public_registration = true;
     AppState::in_memory(config)
+}
+
+#[tokio::test]
+async fn public_registration_is_disabled_by_default() {
+    let app = router(AppState::in_memory(PalaceConfig::default()));
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/publishers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"blocked","display_name":"Blocked"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]

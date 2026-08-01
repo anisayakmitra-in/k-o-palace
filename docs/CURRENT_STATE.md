@@ -36,7 +36,7 @@ The current migrations and adapter persist package ownership and trust state, an
 
 ### Access and social features
 
-- Publisher registration is unauthenticated and immediately issues a publishing token. There is no identity-verification, invitation, or anti-abuse flow.
+- Public publisher registration is disabled by default and must be explicitly enabled with `PALACE_ALLOW_PUBLIC_REGISTRATION=true`. Enabled registration still issues a publishing token and needs identity verification, invitations, and stronger anti-abuse controls for a public service.
 - Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes remain unrestricted for compatibility; new tokens should request least privilege.
 
 - Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; a distributed deployment still needs a shared limiter.
