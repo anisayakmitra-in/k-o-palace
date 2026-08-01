@@ -2,6 +2,9 @@
 
 use k_o_palace::{artifact::validate_artifact_url, config::PalaceConfig};
 
+#[cfg(feature = "reqwest")]
+use k_o_palace::{artifact::fetch_and_verify_with_config, error::PalaceErrorCode};
+
 fn config_with_hosts(hosts: Vec<String>) -> PalaceConfig {
     let mut cfg = PalaceConfig::default();
     cfg.storage.allowed_hosts = hosts;
@@ -33,6 +36,26 @@ fn url_not_on_allowlist_rejected() {
         err.code,
         k_o_palace::error::PalaceErrorCode::ArtifactNotAllowed
     );
+}
+
+#[test]
+fn allowlisted_loopback_address_is_rejected() {
+    let cfg = config_with_hosts(vec!["127.0.0.1".into()]);
+    let err = validate_artifact_url("https://127.0.0.1/pkg.tar.gz", &cfg).unwrap_err();
+    assert_eq!(
+        err.code,
+        k_o_palace::error::PalaceErrorCode::ArtifactNotAllowed
+    );
+}
+
+#[cfg(feature = "reqwest")]
+#[tokio::test]
+async fn fetch_rejects_allowlisted_localhost_before_connecting() {
+    let cfg = config_with_hosts(vec!["localhost".into()]);
+    let err = fetch_and_verify_with_config("https://localhost/pkg.tar.gz", None, &cfg)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, PalaceErrorCode::ArtifactNotAllowed);
 }
 
 #[test]
