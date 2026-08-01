@@ -19,9 +19,7 @@ pub struct VerifiedArtifact {
     pub public_key: Option<String>,
 }
 
-pub(crate) fn publisher_verification_audit(
-    verification: &PublisherVerification,
-) -> AuditEvent {
+pub(crate) fn publisher_verification_audit(verification: &PublisherVerification) -> AuditEvent {
     AuditEvent {
         id: Uuid::now_v7(),
         event_type: "publisher_verification_updated".into(),

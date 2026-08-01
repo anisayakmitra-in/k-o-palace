@@ -4,8 +4,8 @@ use chrono::Utc;
 use k_o_palace::{
     auth::create_api_token,
     models::{
-        AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher, PublisherVerification, Review,
-        ReviewStatus, Role, TrustInfo, TrustLevel,
+        AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher,
+        PublisherVerification, Review, ReviewStatus, Role, TrustInfo, TrustLevel,
     },
     repository::{postgres::PostgresRepository, PackageRepository},
 };
@@ -211,7 +211,10 @@ async fn postgres_publisher_verification_and_audit_are_atomic() {
         })),
         created_at: Utc::now(),
     };
-    repository.record_audit_event(&duplicate_audit).await.unwrap();
+    repository
+        .record_audit_event(&duplicate_audit)
+        .await
+        .unwrap();
 
     let verification = PublisherVerification {
         publisher_id: target.id,
@@ -227,9 +230,11 @@ async fn postgres_publisher_verification_and_audit_are_atomic() {
 
     assert_eq!(error.code, k_o_palace::error::PalaceErrorCode::Conflict);
     assert_eq!(error.message, "repository operation failed");
-    assert!(!repository
-        .get_publisher_verification(target.id)
-        .await
-        .unwrap()
-        .verified);
+    assert!(
+        !repository
+            .get_publisher_verification(target.id)
+            .await
+            .unwrap()
+            .verified
+    );
 }

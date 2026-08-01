@@ -2,8 +2,8 @@ use chrono::Utc;
 use k_o_palace::{
     error::PalaceErrorCode,
     models::{
-        AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher, PublisherVerification, Role, TrustInfo,
-        TrustLevel,
+        AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher,
+        PublisherVerification, Role, TrustInfo, TrustLevel,
     },
     repository::{memory::InMemoryRepository, PackageRepository},
 };
@@ -111,7 +111,10 @@ async fn publisher_verification_rolls_back_when_its_audit_cannot_be_recorded() {
         })),
         created_at: Utc::now(),
     };
-    repository.record_audit_event(&duplicate_audit).await.unwrap();
+    repository
+        .record_audit_event(&duplicate_audit)
+        .await
+        .unwrap();
 
     let verification = PublisherVerification {
         publisher_id: target.id,
@@ -126,9 +129,11 @@ async fn publisher_verification_rolls_back_when_its_audit_cannot_be_recorded() {
         .unwrap_err();
 
     assert_eq!(error.code, PalaceErrorCode::Conflict);
-    assert!(!repository
-        .get_publisher_verification(target.id)
-        .await
-        .unwrap()
-        .verified);
+    assert!(
+        !repository
+            .get_publisher_verification(target.id)
+            .await
+            .unwrap()
+            .verified
+    );
 }

@@ -12,10 +12,7 @@ use uuid::Uuid;
 
 fn repository_error(error: impl std::fmt::Display) -> PalaceError {
     tracing::error!(error = %error, "PostgreSQL repository operation failed");
-    PalaceError::new(
-        PalaceErrorCode::ServerError,
-        "repository operation failed",
-    )
+    PalaceError::new(PalaceErrorCode::ServerError, "repository operation failed")
 }
 
 /// Helper struct for SQLx row mapping.
@@ -398,11 +395,7 @@ impl PostgresRepository {
         token: &ApiToken,
         event: &AuditEvent,
     ) -> PalaceResult<()> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         sqlx::query(
             "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -431,10 +424,7 @@ impl PostgresRepository {
         .execute(&mut *transaction)
         .await
         .map_err(repository_error)?;
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)
+        transaction.commit().await.map_err(repository_error)
     }
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
         let id = crate::repository::token_id_from_opaque(plaintext).ok_or_else(|| {
@@ -494,11 +484,7 @@ impl PostgresRepository {
         id: Uuid,
         event: &AuditEvent,
     ) -> PalaceResult<()> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         let result = sqlx::query("UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1")
             .bind(id)
             .execute(&mut *transaction)
@@ -523,10 +509,7 @@ impl PostgresRepository {
         .execute(&mut *transaction)
         .await
         .map_err(repository_error)?;
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)
+        transaction.commit().await.map_err(repository_error)
     }
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
         let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
@@ -671,11 +654,7 @@ impl PostgresRepository {
             }
         }
 
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         let tags_json = serde_json::to_value(&package.tags).unwrap_or_default();
         let caps_json = serde_json::to_value(&package.capabilities).unwrap_or_default();
         let compat_json = serde_json::to_value(&package.compatibility).unwrap_or_default();
@@ -799,10 +778,7 @@ impl PostgresRepository {
         .await
         .map_err(repository_error)?;
 
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)?;
+        transaction.commit().await.map_err(repository_error)?;
         Ok(package.clone())
     }
 
@@ -814,11 +790,7 @@ impl PostgresRepository {
         ))
     }
     pub async fn delete_package(&self, id: &str, publisher_id: Uuid) -> PalaceResult<()> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         let result =
             sqlx::query("UPDATE packages SET yanked = TRUE, updated_at = NOW() WHERE id = $1")
                 .bind(id)
@@ -843,10 +815,7 @@ impl PostgresRepository {
         .execute(&mut *transaction)
         .await
         .map_err(repository_error)?;
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)
+        transaction.commit().await.map_err(repository_error)
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
@@ -861,11 +830,7 @@ impl PostgresRepository {
         version: &str,
         dedupe_key: Option<&str>,
     ) -> PalaceResult<bool> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
 
         if let Some(dedupe_key) = dedupe_key {
             let exists =
@@ -897,10 +862,7 @@ impl PostgresRepository {
             .await
             .map_err(repository_error)?;
             if result.rows_affected() == 0 {
-                transaction
-                    .commit()
-                    .await
-                    .map_err(repository_error)?;
+                transaction.commit().await.map_err(repository_error)?;
                 return Ok(false);
             }
         }
@@ -931,10 +893,7 @@ impl PostgresRepository {
             .map_err(repository_error)?;
         }
 
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)?;
+        transaction.commit().await.map_err(repository_error)?;
         Ok(true)
     }
 
@@ -1136,11 +1095,7 @@ impl PostgresRepository {
         reason: Option<String>,
         event: &AuditEvent,
     ) -> PalaceResult<Review> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         let row = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)>(
             "UPDATE reviews SET status = $1, moderated_by = $2, moderation_reason = $3, moderated_at = NOW() WHERE id = $4 AND package_id = $5 RETURNING id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at"
         )
@@ -1178,19 +1133,12 @@ impl PostgresRepository {
         .execute(&mut *transaction)
         .await
         .map_err(repository_error)?;
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)?;
+        transaction.commit().await.map_err(repository_error)?;
         Ok(review)
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
-        let mut transaction = self
-            .pool
-            .begin()
-            .await
-            .map_err(repository_error)?;
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         sqlx::query(
             "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
@@ -1218,10 +1166,7 @@ impl PostgresRepository {
                 "package not found",
             ));
         }
-        transaction
-            .commit()
-            .await
-            .map_err(repository_error)
+        transaction.commit().await.map_err(repository_error)
     }
 
     pub async fn list_trust_transitions(

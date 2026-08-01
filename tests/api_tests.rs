@@ -4,6 +4,7 @@ use axum::body::Body;
 use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
+use k_o_palace::rate_limit::{RateLimiter, RateLimiters};
 use k_o_palace::{
     app::AppState,
     auth::{create_api_token_with_options, register_publisher},
@@ -14,7 +15,6 @@ use k_o_palace::{
     },
     routes::router,
 };
-use k_o_palace::rate_limit::{RateLimiter, RateLimiters};
 use std::{net::SocketAddr, sync::Arc};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -23,7 +23,6 @@ fn test_state() -> AppState {
     let config = PalaceConfig::default();
     AppState::in_memory(config)
 }
-
 
 fn read_limited_state(trust_forwarded_headers: bool) -> AppState {
     let mut config = PalaceConfig::default();

@@ -9,9 +9,7 @@ fn validate_startup_config(
     config: &PalaceConfig,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if config.security.replica_count != 1 {
-        return Err(
-            "PALACE_REPLICA_COUNT must be 1 while rate limiting is process-local".into(),
-        );
+        return Err("PALACE_REPLICA_COUNT must be 1 while rate limiting is process-local".into());
     }
 
     if !config.server.bind_addr.ip().is_loopback() {
@@ -86,12 +84,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
-        .with_graceful_shutdown(shutdown_signal())
-        .await
-        .map_err(|e: std::io::Error| {
-            tracing::error!("server error: {}", e);
-            Box::<dyn std::error::Error + Send + Sync>::from(e)
-        })?;
+    .with_graceful_shutdown(shutdown_signal())
+    .await
+    .map_err(|e: std::io::Error| {
+        tracing::error!("server error: {}", e);
+        Box::<dyn std::error::Error + Send + Sync>::from(e)
+    })?;
 
     Ok(())
 }

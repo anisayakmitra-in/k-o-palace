@@ -338,14 +338,7 @@ fn runtime_constraint_names_match_requested_runtime() {
 #[test]
 fn resolution_work_budget_does_not_expand_with_catalog_size() {
     let required: Vec<String> = (0..1025).map(|index| format!("cap.{index}")).collect();
-    let mut root = package(
-        "root.pkg",
-        "1.0.0",
-        TrustLevel::Certified,
-        1,
-        &[],
-        &[],
-    );
+    let mut root = package("root.pkg", "1.0.0", TrustLevel::Certified, 1, &[], &[]);
     root.capabilities.requires = required;
 
     let catalog: Vec<Package> = (0..300)
@@ -362,6 +355,8 @@ fn resolution_work_budget_does_not_expand_with_catalog_size() {
         .collect();
 
     let response = resolve_dependencies(&root, &catalog, ResolveOptions::default());
-    assert!(response.resolved_dependencies.iter().any(|dependency| {
-        dependency.reason == "resolution work budget exceeded"
-    }));
+    assert!(response
+        .resolved_dependencies
+        .iter()
+        .any(|dependency| { dependency.reason == "resolution work budget exceeded" }));
+}
