@@ -125,3 +125,32 @@ jobs:
         run: |
           cargo install cargo-cyclonedx --locked
           cargo cyclonedx -f json
+
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: k-o-palace-sbom
+          path: "*.cdx.json"
+          if-no-files-found: error
+
+  release-gates:
+    name: Release Gates
+    if: always()
+    needs: [validate, build, migration-verify, sbom]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every gate to pass
+        shell: bash
+        run: |
+          results=(
+            "validate=${{ needs.validate.result }}"
+            "build=${{ needs.build.result }}"
+            "migration-verify=${{ needs.migration-verify.result }}"
+            "sbom=${{ needs.sbom.result }}"
+          )
+          for result in "${results[@]}"; do
+            echo "$result"
+            if [[ "$result" != *=success ]]; then
+              exit 1
+            fi
+          done
