@@ -33,6 +33,10 @@ struct PackageRow {
     provenance: Option<serde_json::Value>,
     created_at: chrono::DateTime<Utc>,
     updated_at: chrono::DateTime<Utc>,
+    trust_level: String,
+    content_hash: Option<String>,
+    public_key: Option<String>,
+    signature: Option<String>,
 }
 
 impl From<PackageRow> for Package {
@@ -46,10 +50,10 @@ impl From<PackageRow> for Package {
             author: r.author.clone(),
             license: r.license,
             trust: TrustInfo {
-                level: TrustLevel::Community,
-                signature: None,
-                public_key: None,
-                content_hash: None,
+                level: TrustLevel::parse(&r.trust_level).unwrap_or_default(),
+                signature: r.signature,
+                public_key: r.public_key,
+                content_hash: r.content_hash,
                 publisher: r.author,
             },
             repository: r.repository,
@@ -314,7 +318,7 @@ impl PostgresRepository {
         pagination: Pagination,
     ) -> PalaceResult<(usize, Vec<Package>)> {
         let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages ORDER BY created_at DESC LIMIT $1 OFFSET $2"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages ORDER BY created_at DESC LIMIT $1 OFFSET $2"
         )
         .bind(pagination.limit as i64)
         .bind(pagination.offset as i64)
@@ -335,7 +339,7 @@ impl PostgresRepository {
 
     pub async fn get_package(&self, id: &str) -> PalaceResult<Package> {
         let row = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages WHERE id = $1 ORDER BY created_at DESC LIMIT 1"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages WHERE id = $1 ORDER BY created_at DESC LIMIT 1"
         )
         .bind(id)
         .fetch_optional(&self.pool)
@@ -346,9 +350,20 @@ impl PostgresRepository {
         Ok(row.into())
     }
 
+    pub async fn get_package_publisher_id(&self, id: &str) -> PalaceResult<Option<Uuid>> {
+        let row = sqlx::query_as::<_, (Option<Uuid>,)>(
+            "SELECT publisher_id FROM packages WHERE id = $1 ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        Ok(row.0)
+    }
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
         let row = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages WHERE id = $1 AND version = $2"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages WHERE id = $1 AND version = $2"
         )
         .bind(id)
         .bind(version)
@@ -362,7 +377,7 @@ impl PostgresRepository {
 
     pub async fn list_versions(&self, id: &str) -> PalaceResult<Vec<VersionInfo>> {
         let rows = sqlx::query_as::<_, (String, chrono::DateTime<Utc>, Option<String>, Option<String>)>(
-            "SELECT version, created_at, artifact_url, NULL as content_hash FROM packages WHERE id = $1 ORDER BY created_at DESC"
+            "SELECT version, created_at, artifact_url, content_hash FROM packages WHERE id = $1 ORDER BY created_at DESC"
         )
         .bind(id)
         .fetch_all(&self.pool)
@@ -400,8 +415,8 @@ impl PostgresRepository {
         let compat_json = serde_json::to_value(&package.compatibility).unwrap_or_default();
 
         let result = sqlx::query(
-            "INSERT INTO packages (id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+            "INSERT INTO packages (id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25)
              ON CONFLICT (id, version) DO NOTHING"
         )
         .bind(&package.id)
@@ -411,6 +426,7 @@ impl PostgresRepository {
         .bind(&package.description)
         .bind(&package.author)
         .bind(&package.license)
+        .bind(actor_id)
         .bind(&package.repository)
         .bind(&package.artifact_url)
         .bind(&package.homepage)
@@ -424,6 +440,10 @@ impl PostgresRepository {
         .bind(serde_json::to_value(&package.provenance).unwrap_or(serde_json::Value::Null))
         .bind(package.created_at)
         .bind(package.updated_at)
+        .bind(package.trust.level.as_str())
+        .bind(&package.trust.content_hash)
+        .bind(&package.trust.public_key)
+        .bind(&package.trust.signature)
         .execute(&mut *transaction)
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
@@ -492,19 +512,40 @@ impl PostgresRepository {
             "published package versions cannot be updated",
         ))
     }
-    pub async fn delete_package(&self, id: &str, _publisher_id: Uuid) -> PalaceResult<()> {
-        let result = sqlx::query("DELETE FROM packages WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
+    pub async fn delete_package(&self, id: &str, publisher_id: Uuid) -> PalaceResult<()> {
+        let mut transaction = self
+            .pool
+            .begin()
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        let result =
+            sqlx::query("UPDATE packages SET yanked = TRUE, updated_at = NOW() WHERE id = $1")
+                .bind(id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
                 "package not found",
             ));
         }
-        Ok(())
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, NOW())",
+        )
+        .bind(Uuid::now_v7())
+        .bind("package.yanked")
+        .bind(publisher_id)
+        .bind("package")
+        .bind(id)
+        .bind(serde_json::json!({"all_versions": true}))
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
@@ -524,7 +565,7 @@ impl PostgresRepository {
     ) -> PalaceResult<(usize, Vec<Package>)> {
         let pattern = format!("%{query}%");
         let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages WHERE name ILIKE $1 OR description ILIKE $1 ORDER BY downloads DESC LIMIT $2 OFFSET $3"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages WHERE name ILIKE $1 OR description ILIKE $1 ORDER BY downloads DESC LIMIT $2 OFFSET $3"
         )
         .bind(&pattern)
         .bind(pagination.limit as i64)
@@ -549,7 +590,7 @@ impl PostgresRepository {
 
     pub async fn featured(&self, limit: usize) -> PalaceResult<Vec<Package>> {
         let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages ORDER BY success_rate DESC, downloads DESC LIMIT $1"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages ORDER BY success_rate DESC, downloads DESC LIMIT $1"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -561,7 +602,7 @@ impl PostgresRepository {
 
     pub async fn trending(&self, limit: usize) -> PalaceResult<Vec<Package>> {
         let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages ORDER BY downloads DESC LIMIT $1"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages ORDER BY downloads DESC LIMIT $1"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -573,7 +614,7 @@ impl PostgresRepository {
 
     pub async fn newest(&self, limit: usize) -> PalaceResult<Vec<Package>> {
         let rows: Vec<PackageRow> = sqlx::query_as::<_, PackageRow>(
-            "SELECT id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at FROM packages ORDER BY created_at DESC LIMIT $1"
+            "SELECT id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature FROM packages ORDER BY created_at DESC LIMIT $1"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -661,21 +702,42 @@ impl PostgresRepository {
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
-        let id = uuid::Uuid::now_v7();
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         sqlx::query(
-            "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
-        .bind(id)
+        .bind(Uuid::now_v7())
         .bind(&transition.package_id)
         .bind(&transition.from_level)
         .bind(&transition.to_level)
         .bind(transition.approved_by)
         .bind(&transition.reason)
         .bind(transition.created_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
-        .map(|_| ())
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+
+        let result =
+            sqlx::query("UPDATE packages SET trust_level = $1, updated_at = NOW() WHERE id = $2")
+                .bind(&transition.to_level)
+                .bind(&transition.package_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        transaction
+            .commit()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
     }
 
     pub async fn list_trust_transitions(

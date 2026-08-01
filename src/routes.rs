@@ -7,19 +7,21 @@ use crate::{
     models::{
         ListParams, Package, PackageListResponse, PublisherRegisterRequest,
         PublisherRegisterResponse, PublisherResponse, Review, ReviewRequest, SearchParams,
-        TokenCreateRequest, TokenCreateResponse, TokenResponse, VersionListResponse,
+        TokenCreateRequest, TokenCreateResponse, TokenResponse, TrustTransitionRequest,
+        VersionListResponse,
     },
     pagination::Pagination,
     repository::PackageFilters,
     request_id::request_id_middleware,
     search::rank_results,
+    trust::transition_trust,
     validation::{normalize_trust_level, validate_package},
 };
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Redirect,
-    routing::{delete, get},
+    routing::{delete, get, post},
     Json, Router,
 };
 use std::sync::Arc;
@@ -77,6 +79,10 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/packages/{id}/versions", get(list_versions))
         .route("/api/v1/packages/{id}/versions/{version}", get(get_version))
         .route("/api/v1/packages/{id}/download", get(download_package))
+        .route(
+            "/api/v1/packages/{id}/trust",
+            post(transition_package_trust),
+        )
         .route(
             "/api/v1/packages/{id}/reviews",
             get(list_reviews).post(add_review),
@@ -313,7 +319,11 @@ async fn update_package(
 ) -> PalaceResult<Json<Package>> {
     let auth = authenticate_header(&state, &headers).await?;
     let existing = state.repo.get_package(&id).await?;
-    if !auth.owns(&existing.trust.publisher) {
+    let owner_id = state.repo.get_package_publisher_id(&id).await?;
+    let owns = owner_id
+        .map(|owner| owner == auth.publisher.id)
+        .unwrap_or_else(|| auth.owns(&existing.trust.publisher));
+    if !owns {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
             "only the publisher or admin can update this package",
@@ -335,7 +345,11 @@ async fn delete_package(
 ) -> PalaceResult<StatusCode> {
     let auth = authenticate_header(&state, &headers).await?;
     let existing = state.repo.get_package(&id).await?;
-    if !auth.owns(&existing.trust.publisher) && !auth.can_moderate() {
+    let owner_id = state.repo.get_package_publisher_id(&id).await?;
+    let owns = owner_id
+        .map(|owner| owner == auth.publisher.id)
+        .unwrap_or_else(|| auth.owns(&existing.trust.publisher));
+    if !owns && !auth.can_moderate() {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
             "only the publisher or moderator can delete this package",
@@ -346,6 +360,16 @@ async fn delete_package(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn transition_package_trust(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Path(id): Path<String>,
+    Json(req): Json<TrustTransitionRequest>,
+) -> PalaceResult<Json<crate::models::TrustTransition>> {
+    let auth = authenticate_header(&state, &headers).await?;
+    let transition = transition_trust(&state.repo, &auth, &id, req.level, req.reason).await?;
+    Ok(Json(transition))
+}
 async fn download_package(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -360,6 +384,13 @@ async fn download_package(
     }
 
     let package = state.repo.get_package(&id).await?;
+    if package.yanked {
+        return Err(PalaceError::new(
+            PalaceErrorCode::PackageYanked,
+            format!("Package '{}' is yanked and no longer installable", id),
+        ));
+    }
+
     let artifact_url = package.artifact_url.ok_or_else(|| {
         PalaceError::new(
             PalaceErrorCode::NotFound,

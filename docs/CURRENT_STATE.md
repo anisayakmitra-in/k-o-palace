@@ -14,7 +14,7 @@ K-O Palace is a Rust registry API. Its default build uses PostgreSQL; the explic
 - The in-memory backend supports package versions, publisher lookup, package search, discovery lists, reviews, token management, trust-transition records, and yanking helpers.
 - The publisher directory returns public publisher profiles in a deterministic name order.
 - Artifact fetches enforce HTTPS, allowed hosts, safe resolved destinations, per-redirect validation, configured response limits, and optional SHA-256 verification. Ed25519 verification is available as a library helper.
-- The PostgreSQL adapter has a database-backed integration test. It runs when `KOP_TEST_DATABASE_URL` is provided, including in CI.
+- The PostgreSQL adapter persists publisher ownership, package trust metadata, verified artifact metadata, and audit events. Its database-backed integration test runs when `KOP_TEST_DATABASE_URL` is provided, including in CI.
 
 ## Runtime Boundary
 
@@ -24,14 +24,14 @@ The default feature set selects `AppState::postgres`, runs SQLx migrations, and 
 
 ### PostgreSQL parity
 
-The current migration and adapter pass the database-backed core-record integration test. Broader parity coverage remains incomplete: package ownership is still represented through `author`uthor, and concurrent publish, review, download, and trust-transition behavior is not covered.
+The current migrations and adapter persist package ownership and trust state, and the database-backed integration test covers those fields plus yanking. Broader parity coverage remains incomplete: concurrent publish, review, download, and trust-transition behavior is not covered.
 
 ### Publication and artifacts
 
-- The publish route requires a declared digest and verifies fetched artifact bytes and any supplied signature before the package write, but does not yet persist artifact metadata transactionally.
-- `fetch_and_verify` is a library helper behind the optional `reqwest` feature. It is not part of the publish transaction.
-- Artifact fetches buffer the response before enforcing the size limit. Redirect targets are not revalidated against the artifact-host policy.
-- Both persistence backends reject an existing `(id, version)` as an immutable release.
+- The publish route requires a declared digest, verifies fetched artifact bytes and any supplied signature, then transactionally persists the package, artifact metadata, signature metadata, and publication audit event.
+- `fetch_and_verify` is a library helper behind the optional `reqwest` feature and is called by the publish route before the transaction begins.
+- Artifact fetches still buffer the response before enforcing the size limit; the implementation revalidates each redirect destination, but should move to bounded streaming for large artifacts.
+- Both persistence backends reject an existing `(id, version)` as an immutable release. Package deletion now creates a durable yank and records an audit event; yanked packages cannot be downloaded.
 - The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog.
 
 ### Access and social features
@@ -52,7 +52,7 @@ The current migration and adapter pass the database-backed core-record integrati
 
 ## Verified Commands
 
-The following commands passed on this branch after the publisher-directory change:
+The following commands passed on this branch after the ownership and trust parity change:
 
 ```text
 cargo fmt --all -- --check
@@ -64,13 +64,13 @@ cargo test --locked --all-targets
 cargo test --locked --all-targets --features postgres
 ```
 
-They do not replace a PostgreSQL migration test or an artifact-fetch integration test.
+The PostgreSQL integration test remains conditional on `KOP_TEST_DATABASE_URL`; CI supplies that database.
 
 ## Next Order
 
 1. Repair and test the PostgreSQL schema and adapter as one compatibility pass.
 2. Select PostgreSQL explicitly at startup and add database-backed integration tests to CI.
-3. Make publication transactional: authorize, fetch, bound, verify, persist metadata, then publish.
-4. Enforce immutable version records and finish namespace ownership.
-5. Add publisher portfolio queries, review controls, and deterministic discovery rules.
-6. Build the web client after the registry API has durable publisher and package ownership.
+3. Stream artifact verification without retaining the entire artifact in memory.
+4. Add scoped token lookup and per-client abuse controls.
+5. Add publisher verification, review controls, and deterministic discovery rules.
+6. Build the web client after the registry API has dependency resolution, install verification, and durable operational controls.

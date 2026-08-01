@@ -113,4 +113,8 @@ async fn moderator_can_transition_trust() {
     .await
     .unwrap();
     assert_eq!(transition.to_level, "verified");
+    assert_eq!(
+        repo.get_package("test.gene").await.unwrap().trust.level,
+        TrustLevel::Verified
+    );
 }

@@ -79,17 +79,40 @@ async fn postgres_migrates_and_persists_core_registry_records() {
         token.id
     );
 
-    let package = package(&publisher.name);
-    repository.publish_package(&package).await.unwrap();
+    let mut package = package(&publisher.name);
+    package.trust.level = TrustLevel::Verified;
+    package.trust.content_hash = Some("sha256:integration".into());
+    package.trust.signature = Some("signature".into());
+    package.trust.public_key = Some("public-key".into());
+    repository
+        .publish_verified_package(&package, None, Some(publisher.id))
+        .await
+        .unwrap();
     let duplicate = repository.publish_package(&package).await.unwrap_err();
     assert_eq!(
         duplicate.code,
         k_o_palace::error::PalaceErrorCode::ImmutableVersion
     );
+    let loaded = repository.get_package(&package.id).await.unwrap();
+    assert_eq!(loaded.id, package.id);
+    assert_eq!(loaded.trust.level, TrustLevel::Verified);
     assert_eq!(
-        repository.get_package(&package.id).await.unwrap().id,
-        package.id
+        loaded.trust.content_hash.as_deref(),
+        Some("sha256:integration")
     );
+    assert_eq!(
+        repository
+            .get_package_publisher_id(&package.id)
+            .await
+            .unwrap(),
+        Some(publisher.id)
+    );
+
+    repository
+        .delete_package(&package.id, publisher.id)
+        .await
+        .unwrap();
+    assert!(repository.get_package(&package.id).await.unwrap().yanked);
 
     let review = Review {
         id: Uuid::new_v4(),

@@ -90,6 +90,10 @@ impl PackageRepository {
         dispatch!(self, get_package, id)
     }
 
+    pub async fn get_package_publisher_id(&self, id: &str) -> PalaceResult<Option<Uuid>> {
+        dispatch!(self, get_package_publisher_id, id)
+    }
+
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
         dispatch!(self, get_package_version, id, version)
     }

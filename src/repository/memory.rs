@@ -34,7 +34,7 @@ impl InMemoryRepository {
         let pkgs = self.packages.read().await;
         let mut out: Vec<Package> = pkgs
             .values()
-            .flat_map(|versions| versions.iter().max_by_key(|p| &p.version).cloned())
+            .flat_map(|versions| versions.iter().max_by_key(|p| p.version.clone()).cloned())
             .collect();
 
         if let Some(kind) = filters.kind {
@@ -163,9 +163,17 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
         versions
             .iter()
-            .max_by_key(|p| &p.version)
+            .max_by_key(|p| p.version.clone())
             .cloned()
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "no versions found"))
+    }
+    pub async fn get_package_publisher_id(&self, id: &str) -> PalaceResult<Option<Uuid>> {
+        let package = self.get_package(id).await?;
+        let publishers = self.publishers.read().await;
+        Ok(publishers
+            .values()
+            .find(|p| p.name == package.trust.publisher)
+            .map(|p| p.id))
     }
 
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
@@ -248,11 +256,30 @@ impl InMemoryRepository {
             "published package versions cannot be updated",
         ))
     }
-    pub async fn delete_package(&self, id: &str, _publisher_id: Uuid) -> PalaceResult<()> {
+    pub async fn delete_package(&self, id: &str, publisher_id: Uuid) -> PalaceResult<()> {
         let mut map = self.packages.write().await;
-        map.remove(id)
+        let versions = map
+            .get_mut(id)
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        Ok(())
+        if versions.is_empty() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        for package in versions {
+            package.yanked = true;
+        }
+        drop(map);
+        self.record_audit_event(&AuditEvent {
+            id: Uuid::now_v7(),
+            event_type: "package.yanked".into(),
+            actor_id: Some(publisher_id),
+            package_id: Some(id.into()),
+            details: None,
+            created_at: Utc::now(),
+        })
+        .await
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
@@ -340,6 +367,21 @@ impl InMemoryRepository {
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
+        let level = TrustLevel::parse(&transition.to_level).ok_or_else(|| {
+            PalaceError::new(
+                PalaceErrorCode::ValidationFailed,
+                "invalid trust transition level",
+            )
+        })?;
+        let mut packages = self.packages.write().await;
+        let versions = packages
+            .get_mut(&transition.package_id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        let package = versions
+            .iter_mut()
+            .max_by_key(|p| p.version.clone())
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        package.trust.level = level;
         let mut map = self.transitions.write().await;
         map.entry(transition.package_id.clone())
             .or_default()

@@ -340,6 +340,11 @@ pub struct TrustTransition {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TrustTransitionRequest {
+    pub level: TrustLevel,
+    pub reason: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub id: Uuid,
