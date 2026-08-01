@@ -9,6 +9,16 @@ use crate::models::*;
 use crate::pagination::Pagination;
 use uuid::Uuid;
 
+#[derive(Debug, Clone)]
+pub struct VerifiedArtifact {
+    pub url: String,
+    pub content_type: Option<String>,
+    pub size_bytes: i64,
+    pub content_hash: String,
+    pub signature: Option<String>,
+    pub public_key: Option<String>,
+}
+
 /// Repository backend variants.
 #[derive(Debug, Clone)]
 pub enum PackageRepository {
@@ -90,6 +100,15 @@ impl PackageRepository {
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
         dispatch!(self, publish_package, package)
+    }
+
+    pub async fn publish_verified_package(
+        &self,
+        package: &Package,
+        artifact: Option<&VerifiedArtifact>,
+        actor_id: Option<Uuid>,
+    ) -> PalaceResult<Package> {
+        dispatch!(self, publish_verified_package, package, artifact, actor_id)
     }
 
     pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {

@@ -18,6 +18,7 @@ pub struct InMemoryRepository {
     reviews: Arc<RwLock<HashMap<String, Vec<Review>>>>,
     transitions: Arc<RwLock<HashMap<String, Vec<TrustTransition>>>>,
     audit: Arc<RwLock<Vec<AuditEvent>>>,
+    artifacts: Arc<RwLock<HashMap<(String, String), crate::repository::VerifiedArtifact>>>,
 }
 
 impl InMemoryRepository {
@@ -196,18 +197,47 @@ impl InMemoryRepository {
     }
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
-        let mut map = self.packages.write().await;
-        let versions = map.entry(package.id.clone()).or_default();
-        if versions.iter().any(|p| p.version == package.version) {
-            return Err(PalaceError::new(
-                PalaceErrorCode::Conflict,
-                format!(
-                    "version {} already exists for package {}",
-                    package.version, package.id
-                ),
-            ));
+        self.publish_verified_package(package, None, None).await
+    }
+
+    pub async fn publish_verified_package(
+        &self,
+        package: &Package,
+        artifact: Option<&crate::repository::VerifiedArtifact>,
+        actor_id: Option<Uuid>,
+    ) -> PalaceResult<Package> {
+        {
+            let mut map = self.packages.write().await;
+            let versions = map.entry(package.id.clone()).or_default();
+            if versions.iter().any(|p| p.version == package.version) {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Conflict,
+                    format!(
+                        "version {} already exists for package {}",
+                        package.version, package.id
+                    ),
+                ));
+            }
+            versions.push(package.clone());
         }
-        versions.push(package.clone());
+
+        if let Some(artifact) = artifact {
+            self.artifacts.write().await.insert(
+                (package.id.clone(), package.version.clone()),
+                artifact.clone(),
+            );
+        }
+
+        self.record_audit_event(&AuditEvent {
+            id: Uuid::now_v7(),
+            event_type: "package.published".into(),
+            actor_id,
+            package_id: Some(package.id.clone()),
+            details: Some(serde_json::json!({"version": package.version})),
+            created_at: Utc::now(),
+        })
+        .await?;
+
         Ok(package.clone())
     }
 

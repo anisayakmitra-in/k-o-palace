@@ -381,6 +381,20 @@ impl PostgresRepository {
     }
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
+        self.publish_verified_package(package, None, None).await
+    }
+
+    pub async fn publish_verified_package(
+        &self,
+        package: &Package,
+        artifact: Option<&crate::repository::VerifiedArtifact>,
+        actor_id: Option<Uuid>,
+    ) -> PalaceResult<Package> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         let tags_json = serde_json::to_value(&package.tags).unwrap_or_default();
         let caps_json = serde_json::to_value(&package.capabilities).unwrap_or_default();
         let compat_json = serde_json::to_value(&package.compatibility).unwrap_or_default();
@@ -410,7 +424,7 @@ impl PostgresRepository {
         .bind(serde_json::to_value(&package.provenance).unwrap_or(serde_json::Value::Null))
         .bind(package.created_at)
         .bind(package.updated_at)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
@@ -421,6 +435,53 @@ impl PostgresRepository {
             ));
         }
 
+        if let Some(artifact) = artifact {
+            sqlx::query(
+                "INSERT INTO artifacts (package_id, package_version, url, content_hash, content_type, size_bytes) VALUES ($1, $2, $3, $4, $5, $6)",
+            )
+            .bind(&package.id)
+            .bind(&package.version)
+            .bind(&artifact.url)
+            .bind(&artifact.content_hash)
+            .bind(&artifact.content_type)
+            .bind(artifact.size_bytes)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+
+            if let (Some(public_key), Some(signature)) = (&artifact.public_key, &artifact.signature)
+            {
+                sqlx::query(
+                    "INSERT INTO signatures (package_id, package_version, public_key, signature, verified_at) VALUES ($1, $2, $3, $4, NOW())",
+                )
+                .bind(&package.id)
+                .bind(&package.version)
+                .bind(public_key)
+                .bind(signature)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            }
+        }
+
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(Uuid::now_v7())
+        .bind("package.published")
+        .bind(actor_id)
+        .bind("package")
+        .bind(&package.id)
+        .bind(serde_json::json!({"version": package.version}))
+        .bind(package.created_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+
+        transaction
+            .commit()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         Ok(package.clone())
     }
 

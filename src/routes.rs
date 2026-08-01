@@ -279,12 +279,29 @@ async fn publish_package(
         ));
     }
 
-    if let Some(artifact_url) = &pkg.artifact_url {
-        crate::artifact::fetch_and_verify_package_artifact(artifact_url, &pkg.trust, &state.config)
-            .await?;
-    }
+    let verified_artifact = if let Some(artifact_url) = &pkg.artifact_url {
+        let info = crate::artifact::fetch_and_verify_package_artifact(
+            artifact_url,
+            &pkg.trust,
+            &state.config,
+        )
+        .await?;
+        Some(crate::repository::VerifiedArtifact {
+            url: artifact_url.clone(),
+            content_type: info.content_type,
+            size_bytes: info.size as i64,
+            content_hash: info.hash,
+            signature: pkg.trust.signature.clone(),
+            public_key: pkg.trust.public_key.clone(),
+        })
+    } else {
+        None
+    };
 
-    let package = state.repo.publish_package(&pkg).await?;
+    let package = state
+        .repo
+        .publish_verified_package(&pkg, verified_artifact.as_ref(), Some(auth.publisher.id))
+        .await?;
     Ok((StatusCode::CREATED, Json(package)))
 }
 
