@@ -31,7 +31,7 @@ rand = "0.8"
 argon2 = "0.5"
 bcrypt = "0.16"
 # SQLx with runtime choice (default tokio + rustls)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "json"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros", "migrate", "json"], optional = true }
 # Configuration
 config = "0.15"
 # Rate limiting

@@ -1,0 +1,4 @@
+[advisories]
+# SQLx 0.8's macro crate retains MySQL as an optional lockfile dependency.
+# K-O Palace enables only PostgreSQL; RustSec reports no fixed upgrade.
+ignore = ["RUSTSEC-2023-0071"]
