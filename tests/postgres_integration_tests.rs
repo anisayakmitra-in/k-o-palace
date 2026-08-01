@@ -89,7 +89,10 @@ async fn postgres_migrates_and_persists_core_registry_records() {
         .publish_verified_package(&package, None, Some(publisher.id))
         .await
         .unwrap();
-    let duplicate = repository.publish_package(&package).await.unwrap_err();
+    let duplicate = repository
+        .publish_verified_package(&package, None, Some(publisher.id))
+        .await
+        .unwrap_err();
     assert_eq!(
         duplicate.code,
         k_o_palace::error::PalaceErrorCode::ImmutableVersion
