@@ -30,7 +30,7 @@ The current migrations and adapter persist package ownership and trust state, an
 
 - The publish route requires a declared digest, verifies fetched artifact bytes and any supplied signature, then transactionally persists the package, artifact metadata, signature metadata, and publication audit event.
 - `fetch_and_verify` is a library helper behind the optional `reqwest` feature and is called by the publish route before the transaction begins.
-- Artifact fetches enforce the configured size limit while streaming bytes to a temporary file; publish and download redirects re-fetch and verify the declared digest and signature. Signed artifacts also obey a separate in-memory verification limit.
+- Artifact fetches enforce the configured size limit, validate every redirect destination, and verify the declared digest and signature. Published downloads proxy the exact verified bytes instead of redirecting clients to a mutable upstream URL. Signed artifacts also obey a separate in-memory verification limit.
 - Both persistence backends reject an existing `(id, version)` as an immutable release. Package deletion now creates a durable yank and records an audit event; yanked packages cannot be downloaded.
 - The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog.
 
@@ -64,7 +64,7 @@ cargo test --locked --all-targets
 cargo test --locked --all-targets --features postgres
 ```
 
-The PostgreSQL integration test remains conditional on KOP_TEST_DATABASE_URL; CI supplies that database. Release artifacts currently include checksums and an SBOM; cryptographic signing still requires repository secrets and key-rotation procedures.
+The PostgreSQL integration test remains conditional on KOP_TEST_DATABASE_URL; CI supplies that database. Release artifacts include checksums, an SBOM, and GitHub artifact attestations; platform signing and publisher signature verification remain separate release concerns.
 
 ## Next Order
 
