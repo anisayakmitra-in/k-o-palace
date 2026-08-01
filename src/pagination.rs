@@ -4,7 +4,7 @@ use crate::error::{PalaceError, PalaceErrorCode};
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 250;
-pub const MAX_OFFSET: usize = i64::MAX as usize;
+pub const MAX_OFFSET: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pagination {

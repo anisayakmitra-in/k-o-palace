@@ -2,10 +2,10 @@ use crate::models::{CompatibilityInfo, Package};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 const MIN_RESOLUTION_BUDGET: usize = 64;
-const BUDGET_MULTIPLIER: usize = 4;
+const MAX_RESOLUTION_STEPS: usize = 1_024;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ResolveOptions {
@@ -57,7 +57,8 @@ pub fn resolve_dependencies(
         .collect();
     let mut seen_capabilities = HashSet::new();
     let mut expanded_packages = HashSet::new();
-    let budget = resolution_budget(root, packages);
+    let providers = provider_index(packages);
+    let budget = resolution_budget(root);
     let mut steps = 0usize;
 
     while let Some(capability) = queue.pop_front() {
@@ -65,7 +66,7 @@ pub fn resolve_dependencies(
             continue;
         }
 
-        if steps >= budget {
+        if steps >= budget || steps >= MAX_RESOLUTION_STEPS {
             response.complete = false;
             response.resolved_dependencies.push(ResolvedDependency {
                 capability,
@@ -78,10 +79,10 @@ pub fn resolve_dependencies(
         }
         steps += 1;
 
-        let candidates: Vec<&Package> = packages
-            .iter()
-            .filter(|package| provides_capability(package, &capability) && !package.yanked)
-            .collect();
+        let candidates = providers
+            .get(capability.as_str())
+            .cloned()
+            .unwrap_or_default();
 
         if candidates.is_empty() {
             response.complete = false;
@@ -140,20 +141,24 @@ pub fn resolve_dependencies(
     response
 }
 
-fn resolution_budget(root: &Package, packages: &[Package]) -> usize {
+fn resolution_budget(root: &Package) -> usize {
     let root_requirements = root.capabilities.requires.len();
-    let package_factor = packages.len().saturating_mul(BUDGET_MULTIPLIER);
-    root_requirements
-        .saturating_add(package_factor)
-        .max(MIN_RESOLUTION_BUDGET)
+    root_requirements.max(MIN_RESOLUTION_BUDGET)
 }
 
-fn provides_capability(package: &Package, capability: &str) -> bool {
-    package
-        .capabilities
-        .provides
-        .iter()
-        .any(|provided| provided == capability)
+fn provider_index(packages: &[Package]) -> HashMap<&str, Vec<&Package>> {
+    let mut providers = HashMap::new();
+    for package in packages.iter().filter(|package| !package.yanked) {
+        for capability in &package.capabilities.provides {
+            if !capability.trim().is_empty() {
+                providers
+                    .entry(capability.as_str())
+                    .or_insert_with(Vec::new)
+                    .push(package);
+            }
+        }
+    }
+    providers
 }
 
 fn matches_options(package: &Package, options: &ResolveOptions) -> bool {

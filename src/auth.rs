@@ -26,6 +26,12 @@ pub const DEFAULT_PUBLISHER_SCOPES: &[&str] = &[
     "reviews:write",
 ];
 
+const MAX_DISPLAY_NAME_LEN: usize = 128;
+const MAX_EMAIL_LEN: usize = 254;
+const MAX_WEBSITE_LEN: usize = 2_048;
+const MAX_TOKEN_SCOPES: usize = SUPPORTED_SCOPES.len();
+const MAX_TOKEN_SCOPE_BYTES: usize = 1_024;
+
 /// Authenticated context extracted from an API token.
 #[derive(Debug, Clone)]
 pub struct AuthContext {
@@ -120,6 +126,28 @@ async fn verify_token(
 }
 
 fn validate_scopes(scopes: &[String]) -> PalaceResult<Vec<String>> {
+    if scopes.len() > MAX_TOKEN_SCOPES {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            format!("token may contain at most {MAX_TOKEN_SCOPES} scopes"),
+        ));
+    }
+    let total_bytes = scopes
+        .iter()
+        .try_fold(0usize, |total, scope| total.checked_add(scope.len()))
+        .ok_or_else(|| {
+            PalaceError::new(
+                PalaceErrorCode::BadRequest,
+                "token scope payload is too large",
+            )
+        })?;
+    if total_bytes > MAX_TOKEN_SCOPE_BYTES {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            format!("token scopes may contain at most {MAX_TOKEN_SCOPE_BYTES} bytes"),
+        ));
+    }
+
     let mut normalized = Vec::with_capacity(scopes.len());
     for scope in scopes {
         if !SUPPORTED_SCOPES.contains(&scope.as_str()) {
@@ -241,11 +269,12 @@ pub async fn register_publisher(
     website: Option<String>,
 ) -> PalaceResult<(Publisher, String)> {
     let name = name.into();
-    crate::identity::validate_namespace(&name)?;
+    let display_name = display_name.into();
+    validate_publisher_registration(&name, &display_name, email.as_deref(), website.as_deref())?;
     let publisher = Publisher {
         id: Uuid::new_v4(),
         name: name.clone(),
-        display_name: display_name.into(),
+        display_name,
         email,
         website,
         role: Role::Publisher,
@@ -254,4 +283,32 @@ pub async fn register_publisher(
     let publisher = repo.create_publisher(&publisher).await?;
     let (token, _) = create_api_token(repo, publisher.id, format!("{name}-default")).await?;
     Ok((publisher, token))
+}
+
+fn validate_publisher_registration(
+    name: &str,
+    display_name: &str,
+    email: Option<&str>,
+    website: Option<&str>,
+) -> PalaceResult<()> {
+    crate::identity::validate_namespace(name)?;
+    if display_name.len() > MAX_DISPLAY_NAME_LEN {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            format!("display name must be at most {MAX_DISPLAY_NAME_LEN} bytes"),
+        ));
+    }
+    if email.is_some_and(|value| value.len() > MAX_EMAIL_LEN) {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            format!("email must be at most {MAX_EMAIL_LEN} bytes"),
+        ));
+    }
+    if website.is_some_and(|value| value.len() > MAX_WEBSITE_LEN) {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            format!("website must be at most {MAX_WEBSITE_LEN} bytes"),
+        ));
+    }
+    Ok(())
 }
