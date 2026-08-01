@@ -358,7 +358,7 @@ impl PostgresRepository {
                 .as_database_error()
                 .is_some_and(|database_error| database_error.is_unique_violation())
             {
-                PalaceError::new(PalaceErrorCode::Conflict, "audit event already exists")
+                PalaceError::new(PalaceErrorCode::Conflict, "repository operation failed")
             } else {
                 repository_error(error)
             }
