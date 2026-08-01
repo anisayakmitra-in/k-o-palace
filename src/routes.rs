@@ -2,7 +2,10 @@
 
 use crate::{
     app::AppState,
-    auth::{authenticate, create_api_token, register_publisher, AuthContext},
+    auth::{
+        authenticate, create_api_token_with_options, register_publisher, AuthContext,
+        DEFAULT_PUBLISHER_SCOPES,
+    },
     error::{PalaceError, PalaceErrorCode, PalaceResult},
     models::{
         ListParams, Package, PackageListResponse, PublisherRegisterRequest,
@@ -33,6 +36,31 @@ use tower_http::{
     trace::TraceLayer,
 };
 
+fn rate_limit_key(
+    headers: &axum::http::HeaderMap,
+    namespace: &str,
+    trust_forwarded: bool,
+) -> String {
+    let identity = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| format!("auth:{value}"))
+        .or_else(|| {
+            trust_forwarded
+                .then(|| {
+                    headers
+                        .get("x-forwarded-for")
+                        .and_then(|value| value.to_str().ok())
+                        .map(|value| format!("forwarded:{value}"))
+                })
+                .flatten()
+        })
+        .unwrap_or_else(|| "anonymous".into());
+    format!(
+        "{namespace}:{}",
+        crate::security::sha256_hex(identity.as_bytes())
+    )
+}
 pub fn router(state: AppState) -> Router {
     let cors = if state.config.security.cors_origins.is_empty() {
         CorsLayer::new()
@@ -167,11 +195,16 @@ async fn get_version(
 
 async fn search_packages(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> PalaceResult<Json<PackageListResponse>> {
     // Rate limit
-    let rl_key = "search";
-    if let Err(retry) = state.rate_limiters.search.check(rl_key).await {
+    let rl_key = rate_limit_key(
+        &headers,
+        "search",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.search.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
             format!("rate limit exceeded, retry after {retry}s"),
@@ -249,8 +282,12 @@ async fn publish_package(
     Json(mut pkg): Json<Package>,
 ) -> PalaceResult<(StatusCode, Json<Package>)> {
     // Rate limit
-    let rl_key = "publish"; // Simplified: per-endpoint, not per-client
-    if let Err(retry) = state.rate_limiters.publish.check(rl_key).await {
+    let rl_key = rate_limit_key(
+        &headers,
+        "publish",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.publish.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
             format!("rate limit exceeded, retry after {retry}s"),
@@ -372,11 +409,16 @@ async fn transition_package_trust(
 }
 async fn download_package(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
 ) -> PalaceResult<Redirect> {
     // Rate limit
-    let rl_key = "download";
-    if let Err(retry) = state.rate_limiters.download.check(rl_key).await {
+    let rl_key = rate_limit_key(
+        &headers,
+        "download",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.download.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
             format!("rate limit exceeded, retry after {retry}s"),
@@ -460,8 +502,20 @@ async fn authenticate_header(
 
 async fn register_publisher_handler(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<PublisherRegisterRequest>,
 ) -> PalaceResult<(StatusCode, Json<PublisherRegisterResponse>)> {
+    let rl_key = rate_limit_key(
+        &headers,
+        "registration",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.auth.check(&rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
     let (publisher, token) = register_publisher(
         &state.repo,
         &req.name,
@@ -503,8 +557,47 @@ async fn create_token_handler(
     Json(req): Json<TokenCreateRequest>,
 ) -> PalaceResult<(StatusCode, Json<TokenCreateResponse>)> {
     let auth = authenticate_header(&state, &headers).await?;
+    let rl_key = rate_limit_key(
+        &headers,
+        "token-management",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.auth.check(&rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
 
-    let (plaintext, token) = create_api_token(&state.repo, auth.publisher.id, &req.name).await?;
+    let scopes = if req.scopes.is_empty() {
+        DEFAULT_PUBLISHER_SCOPES
+            .iter()
+            .map(|scope| (*scope).into())
+            .collect()
+    } else {
+        req.scopes.clone()
+    };
+    if scopes.iter().any(|scope| scope == "admin:write") && !auth.publisher.role.can_administer() {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "only administrators can issue admin tokens",
+        ));
+    }
+    if scopes.iter().any(|scope| scope == "moderation:write") && !auth.publisher.role.can_moderate()
+    {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "only moderators can issue moderation tokens",
+        ));
+    }
+    let (plaintext, token) = create_api_token_with_options(
+        &state.repo,
+        auth.publisher.id,
+        &req.name,
+        req.expires_at,
+        scopes,
+    )
+    .await?;
 
     // Record audit event
     let audit = crate::models::AuditEvent {

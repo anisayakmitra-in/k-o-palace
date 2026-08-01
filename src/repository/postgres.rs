@@ -116,7 +116,7 @@ impl PostgresRepository {
             ),
         >(
             "INSERT INTO publishers (id, name, display_name, email, website, role, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (name) DO NOTHING
              RETURNING id, name, display_name, email, website, role, created_at",
         )
@@ -237,8 +237,8 @@ impl PostgresRepository {
 
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         sqlx::query(
-            "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
         )
         .bind(token.id)
         .bind(token.publisher_id)
@@ -247,6 +247,7 @@ impl PostgresRepository {
         .bind(token.created_at)
         .bind(token.revoked_at)
         .bind(token.expires_at)
+        .bind(serde_json::to_value(&token.scopes).unwrap_or_default())
         .execute(&self.pool)
         .await
         .map(|_| ())
@@ -254,8 +255,8 @@ impl PostgresRepository {
     }
 
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
-            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at FROM api_tokens WHERE revoked_at IS NULL"
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
+            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE revoked_at IS NULL"
         )
         .fetch_all(&self.pool)
         .await
@@ -271,6 +272,7 @@ impl PostgresRepository {
                     created_at: row.4,
                     revoked_at: row.5,
                     expires_at: row.6,
+                    scopes: serde_json::from_value(row.7).unwrap_or_default(),
                 });
             }
         }
@@ -280,6 +282,35 @@ impl PostgresRepository {
         ))
     }
 
+    pub async fn get_api_token_by_id(&self, id: Uuid) -> PalaceResult<ApiToken> {
+        sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
+            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE id = $1 AND revoked_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map(|row| ApiToken {
+            id: row.0,
+            publisher_id: row.1,
+            token_hash: row.2,
+            name: row.3,
+            created_at: row.4,
+            revoked_at: row.5,
+            expires_at: row.6,
+            scopes: serde_json::from_value(row.7).unwrap_or_default(),
+        })
+        .ok_or_else(|| PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token"))
+    }
+
+    pub async fn touch_api_token(&self, id: Uuid) -> PalaceResult<()> {
+        sqlx::query("UPDATE api_tokens SET last_used_at = NOW() WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+    }
     pub async fn revoke_api_token(&self, id: Uuid) -> PalaceResult<()> {
         sqlx::query("UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1")
             .bind(id)
@@ -290,8 +321,8 @@ impl PostgresRepository {
     }
 
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>)>(
-            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC"
+        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
+            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC"
         )
         .bind(publisher_id)
         .fetch_all(&self.pool)
@@ -308,6 +339,7 @@ impl PostgresRepository {
                 created_at: r.4,
                 revoked_at: r.5,
                 expires_at: r.6,
+                scopes: serde_json::from_value(r.7).unwrap_or_default(),
             })
             .collect())
     }
@@ -485,7 +517,7 @@ impl PostgresRepository {
         }
 
         sqlx::query(
-            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(Uuid::now_v7())
         .bind("package.published")
@@ -708,7 +740,7 @@ impl PostgresRepository {
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         sqlx::query(
-            "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
         )
         .bind(Uuid::now_v7())
         .bind(&transition.package_id)
@@ -769,7 +801,7 @@ impl PostgresRepository {
     pub async fn record_audit_event(&self, event: &AuditEvent) -> PalaceResult<()> {
         let id = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
         )
         .bind(id)
         .bind(&event.event_type)

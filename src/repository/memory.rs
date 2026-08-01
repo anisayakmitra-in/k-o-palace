@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub struct InMemoryRepository {
     publishers: Arc<RwLock<HashMap<Uuid, Publisher>>>,
     tokens: Arc<RwLock<HashMap<Uuid, ApiToken>>>,
+    last_used: Arc<RwLock<HashMap<Uuid, chrono::DateTime<Utc>>>>,
     packages: Arc<RwLock<HashMap<String, Vec<Package>>>>,
     reviews: Arc<RwLock<HashMap<String, Vec<Review>>>>,
     transitions: Arc<RwLock<HashMap<String, Vec<TrustTransition>>>>,
@@ -132,6 +133,21 @@ impl InMemoryRepository {
             .get_mut(&id)
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "token not found"))?;
         token.revoked_at = Some(Utc::now());
+        Ok(())
+    }
+    pub async fn get_api_token_by_id(&self, id: Uuid) -> PalaceResult<ApiToken> {
+        let map = self.tokens.read().await;
+        map.get(&id)
+            .filter(|token| token.revoked_at.is_none())
+            .cloned()
+            .ok_or_else(|| {
+                PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
+            })
+    }
+
+    pub async fn touch_api_token(&self, id: Uuid) -> PalaceResult<()> {
+        let mut map = self.last_used.write().await;
+        map.insert(id, Utc::now());
         Ok(())
     }
 

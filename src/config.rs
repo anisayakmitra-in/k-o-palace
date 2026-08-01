@@ -59,6 +59,7 @@ pub struct SecurityConfig {
     pub require_https_in_production: bool,
     pub max_body_bytes: usize,
     pub request_timeout_secs: u64,
+    pub trust_forwarded_headers: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +102,7 @@ impl Default for PalaceConfig {
                 require_https_in_production: true,
                 max_body_bytes: 16 * 1024 * 1024,
                 request_timeout_secs: 30,
+                trust_forwarded_headers: false,
             },
             registry: RegistryConfig {
                 seed_samples: false,
@@ -112,6 +114,21 @@ impl Default for PalaceConfig {
     }
 }
 
+impl StorageBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(Self::Local),
+            "github" | "github_release" => Some(Self::GitHub),
+            "gitlab" => Some(Self::GitLab),
+            "codeberg" => Some(Self::Codeberg),
+            "oci" => Some(Self::Oci),
+            "s3" => Some(Self::S3),
+            "azure" => Some(Self::Azure),
+            "gcs" => Some(Self::Gcs),
+            _ => None,
+        }
+    }
+}
 impl PalaceConfig {
     /// Load configuration from environment variables.
     pub fn from_env() -> Self {
@@ -129,6 +146,45 @@ impl PalaceConfig {
         }
         if let Ok(cors) = std::env::var("PALACE_CORS_ORIGINS") {
             cfg.security.cors_origins = cors.split(',').map(|s| s.trim().to_string()).collect();
+        }
+        if let Ok(hosts) = std::env::var("PALACE_ALLOWED_HOSTS") {
+            cfg.storage.allowed_hosts = hosts
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Ok(backend) = std::env::var("PALACE_STORAGE_BACKEND") {
+            if let Some(value) = StorageBackend::parse(&backend) {
+                cfg.storage.backend = value;
+            }
+        }
+        if let Ok(path) = std::env::var("PALACE_STORAGE_LOCAL_PATH") {
+            cfg.storage.local_path = Some(path);
+        }
+        if let Ok(url) = std::env::var("PALACE_GITHUB_RELEASE_API_URL") {
+            cfg.storage.github_release_api_url = Some(url);
+        }
+        if let Ok(size) = std::env::var("PALACE_MAX_ARTIFACT_SIZE_BYTES") {
+            if let Ok(value) = size.parse() {
+                cfg.storage.max_artifact_size_bytes = value;
+            }
+        }
+        if let Ok(size) = std::env::var("PALACE_MAX_BODY_BYTES") {
+            if let Ok(value) = size.parse() {
+                cfg.security.max_body_bytes = value;
+                cfg.server.body_limit_bytes = value;
+            }
+        }
+        if let Ok(seconds) = std::env::var("PALACE_REQUEST_TIMEOUT_SECS") {
+            if let Ok(value) = seconds.parse() {
+                cfg.security.request_timeout_secs = value;
+                cfg.server.request_timeout_seconds = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_TRUST_PROXY_HEADERS") {
+            cfg.security.trust_forwarded_headers =
+                value == "1" || value.eq_ignore_ascii_case("true");
         }
         if let Ok(seed) = std::env::var("PALACE_SEED_SAMPLES") {
             cfg.registry.seed_samples = seed == "1" || seed.eq_ignore_ascii_case("true");

@@ -102,6 +102,7 @@ async fn moderator_can_transition_trust() {
     let ctx = AuthContext {
         publisher: publisher.clone(),
         token_id: Uuid::new_v4(),
+        scopes: vec![],
     };
     let transition = transition_trust(
         &repo,

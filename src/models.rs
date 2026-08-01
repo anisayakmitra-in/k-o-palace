@@ -327,6 +327,8 @@ pub struct ApiToken {
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -470,6 +472,8 @@ pub struct TokenCreateRequest {
     pub name: String,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// Public token response (never includes token_hash).
@@ -480,6 +484,7 @@ pub struct TokenResponse {
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub scopes: Vec<String>,
 }
 
 impl From<ApiToken> for TokenResponse {
@@ -490,6 +495,7 @@ impl From<ApiToken> for TokenResponse {
             created_at: t.created_at,
             revoked_at: t.revoked_at,
             expires_at: t.expires_at,
+            scopes: t.scopes,
         }
     }
 }

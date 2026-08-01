@@ -69,9 +69,15 @@ impl PackageRepository {
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
         dispatch!(self, get_api_token_by_plaintext, plaintext)
     }
+    pub async fn get_api_token_by_id(&self, id: Uuid) -> PalaceResult<ApiToken> {
+        dispatch!(self, get_api_token_by_id, id)
+    }
 
     pub async fn revoke_api_token(&self, id: Uuid) -> PalaceResult<()> {
         dispatch!(self, revoke_api_token, id)
+    }
+    pub async fn touch_api_token(&self, id: Uuid) -> PalaceResult<()> {
+        dispatch!(self, touch_api_token, id)
     }
 
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
