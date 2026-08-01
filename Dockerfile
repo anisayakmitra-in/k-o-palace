@@ -8,10 +8,7 @@ RUN cargo build --release --locked
 
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818
 
-RUN apt-get update \
-    && apt-get install --no-install-recommends -y ca-certificates curl \
-    && rm -rf /var/lib/apt/lists/* \
-    && useradd --system --create-home --uid 10001 kopalace
+RUN useradd --system --create-home --uid 10001 kopalace
 
 COPY --from=builder /app/target/release/k-o-palace /usr/local/bin/k-o-palace
 
@@ -20,6 +17,6 @@ EXPOSE 3001
 ENV PALACE_BIND=0.0.0.0:3001
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD /usr/bin/curl --fail http://127.0.0.1:3001/health || exit 1
+    CMD ["/usr/local/bin/k-o-palace", "healthcheck"]
 
 ENTRYPOINT ["/usr/local/bin/k-o-palace"]

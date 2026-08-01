@@ -1,10 +1,23 @@
 //! K-O Palace — Open AI Runtime Registry
 
 use k_o_palace::{app::AppState, config::PalaceConfig, routes::router};
+#[cfg(feature = "reqwest")]
+use std::time::Duration;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(feature = "reqwest")]
+    if std::env::args().nth(1).as_deref() == Some("healthcheck") {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(3))
+            .build()?;
+        let response = client.get("http://127.0.0.1:3001/health").send().await?;
+        if response.status().is_success() {
+            return Ok(());
+        }
+        return Err(format!("health endpoint returned {}", response.status()).into());
+    }
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,k_o_palace=debug"));
     tracing_subscriber::registry()

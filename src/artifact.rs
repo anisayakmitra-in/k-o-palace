@@ -7,6 +7,8 @@ use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 #[cfg(feature = "reqwest")]
 use tokio::io::AsyncWriteExt;
+#[cfg(feature = "reqwest")]
+use tokio_util::io::ReaderStream;
 use url::Url;
 
 /// Metadata about a fetched artifact.
@@ -301,11 +303,11 @@ impl Drop for TemporaryArtifact {
 }
 
 #[cfg(feature = "reqwest")]
-async fn fetch_and_verify_package_artifact_streaming(
+async fn fetch_and_verify_package_artifact_file(
     url: &str,
     trust: &TrustInfo,
     config: &PalaceConfig,
-) -> PalaceResult<ArtifactInfo> {
+) -> PalaceResult<VerifiedArtifactFile> {
     let client = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -476,10 +478,55 @@ async fn fetch_and_verify_package_artifact_streaming(
         }
     }
 
-    Ok(ArtifactInfo {
+    Ok(VerifiedArtifactFile {
+        path: temporary.path.clone(),
         content_type,
         size,
         hash,
+        temporary,
+    })
+}
+#[cfg(feature = "reqwest")]
+struct VerifiedArtifactFile {
+    path: std::path::PathBuf,
+    content_type: Option<String>,
+    size: usize,
+    hash: String,
+    temporary: TemporaryArtifact,
+}
+
+#[cfg(feature = "reqwest")]
+pub struct VerifiedArtifactStream {
+    inner: ReaderStream<tokio::fs::File>,
+    _temporary: TemporaryArtifact,
+}
+
+#[cfg(feature = "reqwest")]
+impl Unpin for VerifiedArtifactStream {}
+
+#[cfg(feature = "reqwest")]
+impl futures_core::Stream for VerifiedArtifactStream {
+    type Item = Result<bytes::Bytes, std::io::Error>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Self::Item>> {
+        std::pin::Pin::new(&mut self.get_mut().inner).poll_next(cx)
+    }
+}
+
+#[cfg(feature = "reqwest")]
+async fn fetch_and_verify_package_artifact_streaming(
+    url: &str,
+    trust: &TrustInfo,
+    config: &PalaceConfig,
+) -> PalaceResult<ArtifactInfo> {
+    let artifact = fetch_and_verify_package_artifact_file(url, trust, config).await?;
+    Ok(ArtifactInfo {
+        content_type: artifact.content_type,
+        size: artifact.size,
+        hash: artifact.hash,
     })
 }
 /// Fetch artifact content (stub when reqwest is not enabled).
@@ -541,6 +588,30 @@ pub async fn fetch_and_verify_with_config(
     ))
 }
 
+#[cfg(feature = "reqwest")]
+pub async fn fetch_and_verify_package_artifact_stream(
+    url: &str,
+    trust: &TrustInfo,
+    config: &PalaceConfig,
+) -> PalaceResult<(VerifiedArtifactStream, Option<String>, usize)> {
+    let artifact = fetch_and_verify_package_artifact_file(url, trust, config).await?;
+    let file = tokio::fs::File::open(&artifact.path)
+        .await
+        .map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to open verified artifact: {error}"),
+            )
+        })?;
+    Ok((
+        VerifiedArtifactStream {
+            inner: ReaderStream::new(file),
+            _temporary: artifact.temporary,
+        },
+        artifact.content_type,
+        artifact.size,
+    ))
+}
 /// Fetch an artifact and verify the declared package digest and signature.
 #[cfg(feature = "reqwest")]
 pub async fn fetch_and_verify_package_artifact(

@@ -235,6 +235,27 @@ impl PackageRepository {
         )
     }
 
+    pub async fn moderate_review_with_audit(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+        event: &AuditEvent,
+    ) -> PalaceResult<Review> {
+        dispatch!(
+            self,
+            moderate_review_with_audit,
+            package_id,
+            review_id,
+            status,
+            moderator_id,
+            reason,
+            event
+        )
+    }
+
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
         dispatch!(self, record_trust_transition, transition)
     }

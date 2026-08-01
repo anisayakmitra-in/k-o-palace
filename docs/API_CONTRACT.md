@@ -24,7 +24,7 @@ Public publisher registration is disabled by default. Operators may explicitly e
 - GET /api/v1/packages/{id} - read the latest package version.
 - GET /api/v1/packages/{id}/versions - list package versions.
 - GET /api/v1/packages/{id}/versions/{version} - read an exact version.
-- GET /api/v1/packages/{id}/download - verify and redirect to a non-yanked artifact.
+- GET /api/v1/packages/{id}/download - verify and stream the exact bytes of a non-yanked artifact through K-O Palace.
 - GET /api/v1/packages/{id}/resolve?runtime=&platform= - resolve required capabilities against non-yanked, compatible packages with a bounded graph walk. It never downloads or executes packages.
 - GET /api/v1/search - search packages with bounded query input.
 - GET /api/v1/publishers and GET /api/v1/publishers/{name} - read publisher profiles.

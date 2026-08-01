@@ -9,4 +9,4 @@ The release workflow builds these targets:
 - macOS `x86_64-apple-darwin`
 - macOS `aarch64-apple-darwin`
 
-Each release includes packaged binaries, SHA-256 checksums, a CycloneDX SBOM, and GitHub artifact attestations for the final release files. These attestations provide keyless build provenance; they do not replace platform signing or publisher signature verification. A green CI run alone is not a release.
+Each release includes packaged binaries, SHA-256 checksums, a CycloneDX SBOM, and GitHub artifact attestations for the final release files. Consumers should verify both the checksum and the attestation before installation: `sha256sum -c <archive>.sha256` and `gh attestation verify <archive> --repo anisayakmitra-in/K-O-Palace --signer-workflow anisayakmitra-in/K-O-Palace/.github/workflows/release.yml`. A green CI run alone is not a release. Platform-specific signing remains a follow-up for native installers.

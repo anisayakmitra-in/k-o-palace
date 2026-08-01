@@ -37,7 +37,7 @@ The current migrations and adapter persist package ownership and trust state, an
 ### Access and social features
 
 - Public publisher registration is disabled by default and must be explicitly enabled with PALACE_ALLOW_PUBLIC_REGISTRATION=true. Publisher verification is moderator-gated and durable; enabled public registration still needs identity verification, invitations, and stronger anti-abuse controls.
-- Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes remain unrestricted for compatibility; new tokens should request least privilege.
+- Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes fail closed and must be reissued with explicit scopes; new tokens should request least privilege.
 
 - Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; a distributed deployment still needs a shared limiter.
 - Reviews enforce one review per publisher and can be published or hidden by moderators. Edit/delete workflows and reputation calculation remain out of scope.
@@ -47,7 +47,7 @@ The current migrations and adapter persist package ownership and trust state, an
 ### Registry ecosystem
 
 - Capability dependency resolution is available through GET /api/v1/packages/{id}/resolve with runtime/platform filters, yanked exclusion, deterministic ranking, cycle protection, and a bounded graph walk. Version constraints, lockfiles, compatibility decisions beyond the current filters, runtime adapters, source-forge provenance, and package transfer/tombstone policy remain incomplete.
-- The package identity validator accepts flat IDs and does not normalize published IDs through the namespace model in `src/identity.rs`.
+- Package ownership checks fail closed for legacy rows without a durable publisher ID; the ownership backfill requires operator review because historical `author` text is not a canonical identity source.
 - `docs/API_CONTRACT.md` publishes the current route, authentication, error, and deployment contract. A machine-generated OpenAPI document is still a follow-up.
 
 ## Verified Commands

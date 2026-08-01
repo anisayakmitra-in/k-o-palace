@@ -509,6 +509,31 @@ impl InMemoryRepository {
         Ok(review.clone())
     }
 
+    pub async fn moderate_review_with_audit(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+        event: &AuditEvent,
+    ) -> PalaceResult<Review> {
+        let mut reviews = self.reviews.write().await;
+        let review = reviews
+            .get_mut(package_id)
+            .into_iter()
+            .flat_map(|items| items.iter_mut())
+            .find(|review| review.id == review_id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
+        review.status = status;
+        review.moderated_by = Some(moderator_id);
+        review.moderation_reason = reason;
+        review.moderated_at = Some(chrono::Utc::now());
+        let updated = review.clone();
+        self.audit.write().await.push(event.clone());
+        Ok(updated)
+    }
+
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
         let level = TrustLevel::parse(&transition.to_level).ok_or_else(|| {
             PalaceError::new(

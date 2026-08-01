@@ -22,10 +22,14 @@ use crate::{
     trust::transition_trust_with_policy,
     validation::{normalize_trust_level, validate_package},
 };
+#[cfg(feature = "reqwest")]
 use axum::{
     body::Body,
+    http::{header, HeaderValue},
+};
+use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderValue, StatusCode},
+    http::StatusCode,
     response::Response,
     routing::{delete, get, patch, post},
     Json, Router,
@@ -69,6 +73,7 @@ fn publisher_rate_limit_key(auth: &AuthContext, namespace: &str) -> String {
     )
 }
 
+#[cfg(feature = "reqwest")]
 fn download_dedupe_key(headers: &axum::http::HeaderMap, trust_forwarded: bool) -> String {
     let rate_key = rate_limit_key(headers, "download", trust_forwarded);
     let user_agent = headers
@@ -451,9 +456,7 @@ async fn update_package(
     }
     let existing = state.repo.get_package(&id).await?;
     let owner_id = state.repo.get_package_publisher_id(&id).await?;
-    let owns = owner_id
-        .map(|owner| owner == auth.publisher.id)
-        .unwrap_or_else(|| auth.owns(&existing.trust.publisher));
+    let owns = owner_id == Some(auth.publisher.id) || auth.can_administer();
     if !owns {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
@@ -481,11 +484,9 @@ async fn delete_package(
             "token lacks package deletion scope",
         ));
     }
-    let existing = state.repo.get_package(&id).await?;
+    state.repo.get_package(&id).await?;
     let owner_id = state.repo.get_package_publisher_id(&id).await?;
-    let owns = owner_id
-        .map(|owner| owner == auth.publisher.id)
-        .unwrap_or_else(|| auth.owns(&existing.trust.publisher));
+    let owns = owner_id == Some(auth.publisher.id) || auth.can_administer();
     if !owns && !auth.can_moderate() && !auth.can_administer() {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
@@ -536,6 +537,7 @@ async fn download_package(
         ));
     }
 
+    #[cfg(feature = "reqwest")]
     let dedupe_key = download_dedupe_key(&headers, state.config.security.trust_forwarded_headers);
     let package = state.repo.get_package(&id).await?;
     if package.yanked {
@@ -553,31 +555,49 @@ async fn download_package(
     })?;
 
     crate::artifact::validate_artifact_url(&artifact_url, &state.config)?;
-    let (content, content_type) = crate::artifact::fetch_and_verify_package_artifact_content(
-        &artifact_url,
-        &package.trust,
-        &state.config,
-    )
-    .await?;
 
-    // Record download
-    state
-        .repo
-        .record_download_with_context(&id, &package.version, Some(&dedupe_key))
-        .await?;
+    #[cfg(not(feature = "reqwest"))]
+    {
+        let _ = artifact_url;
+        return Err(PalaceError::new(
+            PalaceErrorCode::NotImplemented,
+            "reqwest feature not enabled",
+        ));
+    }
 
-    let mut response = Response::new(Body::from(content));
-    let content_type = content_type
-        .as_deref()
-        .and_then(|value| HeaderValue::from_str(value).ok())
-        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, content_type);
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    Ok(response)
+    #[cfg(feature = "reqwest")]
+    {
+        let (stream, content_type, size) =
+            crate::artifact::fetch_and_verify_package_artifact_stream(
+                &artifact_url,
+                &package.trust,
+                &state.config,
+            )
+            .await?;
+
+        state
+            .repo
+            .record_download_with_context(&id, &package.version, Some(&dedupe_key))
+            .await?;
+
+        let mut response = Response::new(Body::from_stream(stream));
+        let content_type = content_type
+            .as_deref()
+            .and_then(|value| HeaderValue::from_str(value).ok())
+            .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
+        response
+            .headers_mut()
+            .insert(header::CONTENT_TYPE, content_type);
+        if let Ok(content_length) = HeaderValue::from_str(&size.to_string()) {
+            response
+                .headers_mut()
+                .insert(header::CONTENT_LENGTH, content_length);
+        }
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        Ok(response)
+    }
 }
 
 async fn list_reviews(
@@ -669,30 +689,28 @@ async fn moderate_review(
         ));
     }
 
+    let audit = crate::models::AuditEvent {
+        id: uuid::Uuid::new_v4(),
+        event_type: "review.moderated".into(),
+        actor_id: Some(auth.publisher.id),
+        package_id: Some(id.clone()),
+        details: Some(serde_json::json!({
+            "review_id": review_id,
+            "status": req.status.as_str(),
+            "reason": reason,
+        })),
+        created_at: chrono::Utc::now(),
+    };
     let review = state
         .repo
-        .moderate_review(
+        .moderate_review_with_audit(
             &id,
             review_id,
             req.status,
             auth.publisher.id,
-            reason.clone(),
+            reason,
+            &audit,
         )
-        .await?;
-    state
-        .repo
-        .record_audit_event(&crate::models::AuditEvent {
-            id: uuid::Uuid::new_v4(),
-            event_type: "review.moderated".into(),
-            actor_id: Some(auth.publisher.id),
-            package_id: Some(id),
-            details: Some(serde_json::json!({
-                "review_id": review_id,
-                "status": review.status.as_str(),
-                "reason": reason,
-            })),
-            created_at: chrono::Utc::now(),
-        })
         .await?;
     Ok(Json(review))
 }
@@ -712,7 +730,7 @@ async fn authenticate_header(
     authenticate(&state.repo, auth).await
 }
 
-// ── Publisher Management Handlers ──
+// Publisher Management Handlers
 
 async fn register_publisher_handler(
     State(state): State<Arc<AppState>>,
@@ -823,7 +841,7 @@ async fn list_publishers(
     Ok(Json(publishers.into_iter().map(Into::into).collect()))
 }
 
-// ── Token Management Handlers ──
+// Token Management Handlers
 
 async fn create_token_handler(
     State(state): State<Arc<AppState>>,

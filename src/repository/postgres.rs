@@ -1013,6 +1013,64 @@ impl PostgresRepository {
         })
     }
 
+    pub async fn moderate_review_with_audit(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+        event: &AuditEvent,
+    ) -> PalaceResult<Review> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        let row = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)>(
+            "UPDATE reviews SET status = $1, moderated_by = $2, moderation_reason = $3, moderated_at = NOW() WHERE id = $4 AND package_id = $5 RETURNING id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at"
+        )
+        .bind(status.as_str())
+        .bind(moderator_id)
+        .bind(reason)
+        .bind(review_id)
+        .bind(package_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
+        let review = Review {
+            id: row.0,
+            package_id: row.1,
+            reviewer_id: row.2,
+            rating: row.3 as i16,
+            comment: row.4,
+            status: ReviewStatus::parse(&row.5).unwrap_or_default(),
+            moderated_by: row.6,
+            moderation_reason: row.7,
+            moderated_at: row.8,
+            created_at: row.9,
+        };
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(event.id)
+        .bind(&event.event_type)
+        .bind(event.actor_id)
+        .bind(event.package_id.as_ref().map(|_| "package"))
+        .bind(&event.package_id)
+        .bind(event.details.clone().unwrap_or_else(|| serde_json::json!({})))
+        .bind(event.created_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        transaction
+            .commit()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        Ok(review)
+    }
+
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
         let mut transaction = self
             .pool
