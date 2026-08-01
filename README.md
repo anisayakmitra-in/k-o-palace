@@ -42,6 +42,15 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - SBOM generation per package version
 - Search index (PostgreSQL full-text or Meilisearch)
 
+## Container Deployment
+
+For a local PostgreSQL-backed deployment:
+
+```bash
+docker compose up --build
+```
+
+Change the example database password before exposing the service. Public deployments should provide secrets through the platform secret manager, terminate TLS at a trusted proxy, set explicit CORS origins, and configure backups for the PostgreSQL volume.
 ## Local Development
 
 ### Prerequisites
