@@ -131,7 +131,7 @@ jobs:
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
 
       - name: Install sqlx-cli
-        run: cargo install sqlx-cli --version 0.9.0 --no-default-features --features postgres,rustls
+        run: cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features postgres,rustls
 
       - name: Run migrations
         run: sqlx migrate run --source migrations
