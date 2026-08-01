@@ -6,6 +6,14 @@ use crate::models::TrustInfo;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 #[cfg(feature = "reqwest")]
+use std::{
+    net::SocketAddr,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
+};
+#[cfg(feature = "reqwest")]
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 #[cfg(feature = "reqwest")]
 use tokio_util::io::ReaderStream;
@@ -23,6 +31,132 @@ pub struct ArtifactInfo {
 struct FetchedArtifact {
     content: Vec<u8>,
     content_type: Option<String>,
+}
+
+#[cfg(feature = "reqwest")]
+const MAX_CONCURRENT_ARTIFACT_DOWNLOADS: usize = 8;
+#[cfg(feature = "reqwest")]
+const MAX_AGGREGATE_RETAINED_ARTIFACT_BYTES: usize = 1024 * 1024 * 1024;
+
+#[cfg(feature = "reqwest")]
+#[derive(Debug)]
+struct ArtifactResourceBudget {
+    state: Arc<ArtifactResourceState>,
+}
+
+#[cfg(feature = "reqwest")]
+#[derive(Debug)]
+struct ArtifactResourceState {
+    max_concurrent_downloads: usize,
+    max_retained_bytes: usize,
+    active_downloads: AtomicUsize,
+    reserved_bytes: AtomicUsize,
+}
+
+#[cfg(feature = "reqwest")]
+#[derive(Debug)]
+struct ArtifactResourcePermit {
+    state: Arc<ArtifactResourceState>,
+    reserved_bytes: usize,
+}
+
+#[cfg(feature = "reqwest")]
+impl ArtifactResourceBudget {
+    fn new(max_concurrent_downloads: usize, max_retained_bytes: usize) -> PalaceResult<Self> {
+        if max_concurrent_downloads == 0 || max_retained_bytes == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::BadRequest,
+                "artifact resource limits must be greater than zero",
+            ));
+        }
+
+        Ok(Self {
+            state: Arc::new(ArtifactResourceState {
+                max_concurrent_downloads,
+                max_retained_bytes,
+                active_downloads: AtomicUsize::new(0),
+                reserved_bytes: AtomicUsize::new(0),
+            }),
+        })
+    }
+
+    fn try_acquire(&self, reserved_bytes: usize) -> PalaceResult<ArtifactResourcePermit> {
+        if reserved_bytes > self.state.max_retained_bytes {
+            return Err(resource_budget_exhausted());
+        }
+
+        if self
+            .state
+            .active_downloads
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < self.state.max_concurrent_downloads).then_some(active + 1)
+            })
+            .is_err()
+        {
+            return Err(resource_budget_exhausted());
+        }
+
+        let reserved = self.state.reserved_bytes.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |current| {
+                current
+                    .checked_add(reserved_bytes)
+                    .filter(|next| *next <= self.state.max_retained_bytes)
+            },
+        );
+        if reserved.is_err() {
+            self.state.active_downloads.fetch_sub(1, Ordering::AcqRel);
+            return Err(resource_budget_exhausted());
+        }
+
+        Ok(ArtifactResourcePermit {
+            state: Arc::clone(&self.state),
+            reserved_bytes,
+        })
+    }
+
+    #[cfg(test)]
+    fn active_downloads(&self) -> usize {
+        self.state.active_downloads.load(Ordering::Acquire)
+    }
+
+    #[cfg(test)]
+    fn reserved_bytes(&self) -> usize {
+        self.state.reserved_bytes.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(feature = "reqwest")]
+impl Drop for ArtifactResourcePermit {
+    fn drop(&mut self) {
+        self.state
+            .reserved_bytes
+            .fetch_sub(self.reserved_bytes, Ordering::AcqRel);
+        self.state.active_downloads.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[cfg(feature = "reqwest")]
+fn resource_budget_exhausted() -> PalaceError {
+    PalaceError::new(
+        PalaceErrorCode::RateLimited,
+        "artifact download resource budget exhausted",
+    )
+}
+
+#[cfg(feature = "reqwest")]
+fn acquire_artifact_resources(reserved_bytes: usize) -> PalaceResult<ArtifactResourcePermit> {
+    static BUDGET: OnceLock<ArtifactResourceBudget> = OnceLock::new();
+    BUDGET
+        .get_or_init(|| {
+            ArtifactResourceBudget::new(
+                MAX_CONCURRENT_ARTIFACT_DOWNLOADS,
+                MAX_AGGREGATE_RETAINED_ARTIFACT_BYTES,
+            )
+            .expect("static artifact resource limits are valid")
+        })
+        .try_acquire(reserved_bytes)
 }
 
 /// Storage backend trait.
@@ -186,27 +320,12 @@ pub async fn fetch_with_redirect_limit(url: &str, max_redirects: u32) -> PalaceR
 
 #[cfg(feature = "reqwest")]
 async fn fetch_artifact(url: &str, config: &PalaceConfig) -> PalaceResult<FetchedArtifact> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| {
-            PalaceError::new(
-                PalaceErrorCode::StorageError,
-                format!("failed to build HTTP client: {error}"),
-            )
-        })?;
+    let _resource_permit = acquire_artifact_resources(config.storage.max_artifact_size_bytes)?;
     let mut next_url = Url::parse(url)
         .map_err(|_| PalaceError::new(PalaceErrorCode::BadRequest, "invalid artifact URL"))?;
 
     for redirect_count in 0..=config.registry.max_redirects {
-        validate_artifact_destination(&next_url, config).await?;
-
-        let mut response = client.get(next_url.clone()).send().await.map_err(|error| {
-            PalaceError::new(
-                PalaceErrorCode::StorageError,
-                format!("failed to fetch artifact: {error}"),
-            )
-        })?;
+        let mut response = send_pinned_request(&next_url, config).await?;
 
         if response.status().is_redirection() {
             if redirect_count == config.registry.max_redirects {
@@ -308,33 +427,13 @@ async fn fetch_and_verify_package_artifact_file(
     trust: &TrustInfo,
     config: &PalaceConfig,
 ) -> PalaceResult<VerifiedArtifactFile> {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .map_err(|error| {
-            PalaceError::new(
-                PalaceErrorCode::StorageError,
-                format!("failed to build HTTP client: {error}"),
-            )
-        })?;
+    let resource_permit = acquire_artifact_resources(config.storage.max_artifact_size_bytes)?;
     let mut next_url = Url::parse(url)
         .map_err(|_| PalaceError::new(PalaceErrorCode::BadRequest, "invalid artifact URL"))?;
-    let temporary = TemporaryArtifact {
-        path: std::env::temp_dir().join(format!(
-            "k-o-palace-artifact-{}.tmp",
-            uuid::Uuid::new_v4().simple()
-        )),
-    };
 
     let mut redirect_count = 0u32;
-    let (content_type, size, hash, mut file) = loop {
-        validate_artifact_destination(&next_url, config).await?;
-        let response = client.get(next_url.clone()).send().await.map_err(|error| {
-            PalaceError::new(
-                PalaceErrorCode::StorageError,
-                format!("failed to fetch artifact: {error}"),
-            )
-        })?;
+    let (content_type, size, hash, mut file, temporary) = loop {
+        let response = send_pinned_request(&next_url, config).await?;
 
         if response.status().is_redirection() {
             let location = response
@@ -392,18 +491,7 @@ async fn fetch_and_verify_package_artifact_file(
             ));
         }
 
-        let mut file = tokio::fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&temporary.path)
-            .await
-            .map_err(|error| {
-                PalaceError::new(
-                    PalaceErrorCode::StorageError,
-                    format!("failed to create temporary artifact: {error}"),
-                )
-            })?;
+        let (temporary, mut file) = create_temporary_artifact().await?;
         let mut hasher = Sha256::new();
         let mut size = 0usize;
         let mut response = response;
@@ -434,7 +522,13 @@ async fn fetch_and_verify_package_artifact_file(
                 format!("failed to flush temporary artifact: {error}"),
             )
         })?;
-        break (content_type, size, hex::encode(hasher.finalize()), file);
+        break (
+            content_type,
+            size,
+            hex::encode(hasher.finalize()),
+            file,
+            temporary,
+        );
     };
 
     let expected = trust
@@ -503,6 +597,7 @@ async fn fetch_and_verify_package_artifact_file(
         hash,
         file,
         temporary,
+        resource_permit,
     })
 }
 #[cfg(feature = "reqwest")]
@@ -512,12 +607,14 @@ struct VerifiedArtifactFile {
     hash: String,
     file: tokio::fs::File,
     temporary: TemporaryArtifact,
+    resource_permit: ArtifactResourcePermit,
 }
 
 #[cfg(feature = "reqwest")]
 pub struct VerifiedArtifactStream {
     inner: ReaderStream<tokio::fs::File>,
     _temporary: TemporaryArtifact,
+    _resource_permit: ArtifactResourcePermit,
 }
 
 #[cfg(feature = "reqwest")]
@@ -618,6 +715,7 @@ pub async fn fetch_and_verify_package_artifact_stream(
         VerifiedArtifactStream {
             inner: ReaderStream::new(artifact.file),
             _temporary: artifact.temporary,
+            _resource_permit: artifact.resource_permit,
         },
         artifact.content_type,
         artifact.size,
@@ -672,7 +770,67 @@ pub async fn fetch_and_verify_package_artifact(
 }
 
 #[cfg(feature = "reqwest")]
-async fn validate_artifact_destination(url: &Url, config: &PalaceConfig) -> PalaceResult<()> {
+#[derive(Debug)]
+struct ResolvedArtifactDestination {
+    url: Url,
+    host: String,
+    addresses: Vec<SocketAddr>,
+}
+
+#[cfg(feature = "reqwest")]
+impl ResolvedArtifactDestination {
+    fn new(url: Url, addresses: Vec<SocketAddr>) -> PalaceResult<Self> {
+        let host = url
+            .host_str()
+            .ok_or_else(|| {
+                PalaceError::new(
+                    PalaceErrorCode::BadRequest,
+                    "artifact URL is missing a host",
+                )
+            })?
+            .to_owned();
+
+        if addresses.is_empty() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::StorageError,
+                "artifact host did not resolve to an address",
+            ));
+        }
+        if addresses
+            .iter()
+            .any(|address| is_unsafe_artifact_address(address.ip()))
+        {
+            return Err(PalaceError::new(
+                PalaceErrorCode::ArtifactNotAllowed,
+                "artifact host resolves to a loopback, private, or local network address",
+            ));
+        }
+
+        Ok(Self {
+            url,
+            host,
+            addresses,
+        })
+    }
+
+    fn url(&self) -> &Url {
+        &self.url
+    }
+
+    fn host(&self) -> &str {
+        &self.host
+    }
+
+    fn addresses(&self) -> &[SocketAddr] {
+        &self.addresses
+    }
+}
+
+#[cfg(feature = "reqwest")]
+async fn resolve_artifact_destination(
+    url: &Url,
+    config: &PalaceConfig,
+) -> PalaceResult<ResolvedArtifactDestination> {
     validate_artifact_url(url.as_str(), config)?;
 
     let host = url.host_str().ok_or_else(|| {
@@ -689,18 +847,64 @@ async fn validate_artifact_destination(url: &Url, config: &PalaceConfig) -> Pala
                 PalaceErrorCode::StorageError,
                 format!("failed to resolve artifact host: {error}"),
             )
-        })?;
+        })?
+        .collect();
 
-    for address in addresses {
-        if is_unsafe_artifact_address(address.ip()) {
-            return Err(PalaceError::new(
-                PalaceErrorCode::ArtifactNotAllowed,
-                "artifact host resolves to a loopback, private, or local network address",
-            ));
-        }
-    }
+    ResolvedArtifactDestination::new(url.clone(), addresses)
+}
 
-    Ok(())
+#[cfg(feature = "reqwest")]
+fn build_pinned_client(destination: &ResolvedArtifactDestination) -> PalaceResult<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .no_proxy()
+        .resolve_to_addrs(destination.host(), destination.addresses())
+        .build()
+        .map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to build pinned HTTP client: {error}"),
+            )
+        })
+}
+
+#[cfg(feature = "reqwest")]
+async fn send_pinned_request(url: &Url, config: &PalaceConfig) -> PalaceResult<reqwest::Response> {
+    let destination = resolve_artifact_destination(url, config).await?;
+    build_pinned_client(&destination)?
+        .get(destination.url().clone())
+        .send()
+        .await
+        .map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to fetch artifact: {error}"),
+            )
+        })
+}
+
+#[cfg(feature = "reqwest")]
+async fn create_temporary_artifact() -> PalaceResult<(TemporaryArtifact, tokio::fs::File)> {
+    let temporary = TemporaryArtifact {
+        path: std::env::temp_dir().join(format!(
+            "k-o-palace-artifact-{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        )),
+    };
+    let mut options = tokio::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    #[cfg(windows)]
+    options.share_mode(0);
+
+    let file = options.open(&temporary.path).await.map_err(|error| {
+        PalaceError::new(
+            PalaceErrorCode::StorageError,
+            format!("failed to create temporary artifact: {error}"),
+        )
+    })?;
+    Ok((temporary, file))
 }
 
 #[cfg(feature = "reqwest")]
@@ -719,4 +923,70 @@ fn validate_content_type(content_type: Option<&str>) -> PalaceResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(all(test, feature = "reqwest"))]
+mod security_tests {
+    use super::*;
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn aggregate_budget_rejects_excess_concurrency_and_retained_bytes() {
+        let budget = ArtifactResourceBudget::new(2, 10).expect("valid test budget");
+
+        let first = budget.try_acquire(6).expect("first reservation");
+        assert_eq!(budget.active_downloads(), 1);
+        assert_eq!(budget.reserved_bytes(), 6);
+
+        let error = budget.try_acquire(5).unwrap_err();
+        assert_eq!(error.code, PalaceErrorCode::RateLimited);
+
+        let second = budget.try_acquire(4).expect("remaining reservation");
+        let error = budget.try_acquire(0).unwrap_err();
+        assert_eq!(error.code, PalaceErrorCode::RateLimited);
+
+        drop(first);
+        assert_eq!(budget.active_downloads(), 1);
+        assert_eq!(budget.reserved_bytes(), 4);
+
+        drop(second);
+        assert_eq!(budget.active_downloads(), 0);
+        assert_eq!(budget.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn pinned_destination_retains_the_approved_addresses_and_https_host() {
+        let url = Url::parse("https://packages.example.test/release.tar.gz").unwrap();
+        let addresses = vec![SocketAddr::new(Ipv4Addr::new(93, 184, 216, 34).into(), 443)];
+        let destination = ResolvedArtifactDestination::new(url.clone(), addresses.clone())
+            .expect("valid resolved destination");
+
+        assert_eq!(destination.url(), &url);
+        assert_eq!(destination.host(), "packages.example.test");
+        assert_eq!(destination.addresses(), addresses.as_slice());
+        build_pinned_client(&destination).expect("approved addresses build a pinned client");
+    }
+
+    #[tokio::test]
+    async fn temporary_artifact_is_private_and_removed_on_drop() {
+        let (temporary, file) = create_temporary_artifact()
+            .await
+            .expect("temporary artifact");
+        let path = temporary.path.clone();
+        assert!(path.exists());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+
+        #[cfg(windows)]
+        assert!(std::fs::File::open(&path).is_err());
+
+        drop(file);
+        drop(temporary);
+        assert!(!path.exists());
+    }
 }
