@@ -7,7 +7,7 @@ Standalone React + Vite client for K-O Palace package discovery and trust review
 - Searches K-O Palace packages through `GET /api/v1/search`
 - Switches between `Pandora Mode` and `Agent Mode`
 - Filters by trust level, signature presence, license, and runtime compatibility
-- Shows a clear discovery-only notice: the UI never auto-executes packages
+- Inspects package trust, compatibility, capabilities, and provenance in a read-only dialog
 - Supports an independent light/dark theme toggle
 
 ## Prerequisites
@@ -22,7 +22,6 @@ cd web
 npm install
 ```
 
-If dependency installation is blocked in your environment, the source tree and manifest are still ready for a normal Vite setup later.
 
 ## Development
 

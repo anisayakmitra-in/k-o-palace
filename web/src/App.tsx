@@ -49,6 +49,7 @@ function App() {
   const [liveTotal, setLiveTotal] = useState<number>(demoPackages.length);
   const [dataSource, setDataSource] = useState<DataSource>("preview");
   const [loading, setLoading] = useState(false);
+  const [selectedPackage, setSelectedPackage] = useState<Package | null>(null);
   const [statusMessage, setStatusMessage] = useState(
     "Showing a local preview until the registry responds.",
   );
@@ -85,8 +86,8 @@ function App() {
         setDataSource(response.packages.length > 0 ? "live" : "empty");
         setStatusMessage(
           response.packages.length > 0
-            ? `Live registry results for “${trimmedQuery}”.`
-            : `No live package matches for “${trimmedQuery}”.`,
+            ? `Live registry results for "${trimmedQuery}".`
+            : `No live package matches for "${trimmedQuery}".`,
         );
       })
       .catch((error: unknown) => {
@@ -326,7 +327,7 @@ function App() {
               <h2>Package cards</h2>
             </div>
             <span className="results-note">
-              {loading ? "Refreshing search…" : statusMessage}
+              {loading ? "Refreshing search..." : statusMessage}
             </span>
           </div>
 
@@ -406,6 +407,13 @@ function App() {
                   </div>
 
                   <div className="card-actions">
+                    <button
+                      type="button"
+                      className="inspect-button"
+                      onClick={() => setSelectedPackage(pkg)}
+                    >
+                      Inspect details
+                    </button>
                     {pkg.repository ? (
                       <a href={pkg.repository} target="_blank" rel="noreferrer">
                         Repository
@@ -428,6 +436,105 @@ function App() {
           )}
         </section>
       </main>
+      {selectedPackage ? (
+        <div
+          className="modal-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setSelectedPackage(null);
+            }
+          }}
+        >
+          <section
+            className="package-dialog bento"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="package-dialog-title"
+          >
+            <div className="dialog-header">
+              <div>
+                <span className="eyebrow">Package inspection</span>
+                <h2 id="package-dialog-title">{selectedPackage.name}</h2>
+                <p className="package-id">
+                  {selectedPackage.id}@{selectedPackage.version}
+                </p>
+              </div>
+              <button
+                type="button"
+                className="dialog-close"
+                aria-label="Close package details"
+                onClick={() => setSelectedPackage(null)}
+              >
+                Close
+              </button>
+            </div>
+
+            <p className="dialog-description">{selectedPackage.description}</p>
+
+            <div className="dialog-grid">
+              <div className="dialog-panel">
+                <span className="signal-label">Trust</span>
+                <strong>{formatLabel(selectedPackage.trust.level)}</strong>
+                <p>
+                  {hasSignature(selectedPackage)
+                    ? "A signature is published for this version."
+                    : "No signature is published for this version."}
+                </p>
+              </div>
+              <div className="dialog-panel">
+                <span className="signal-label">Compatibility</span>
+                <strong>
+                  {selectedPackage.compatibility.platforms.join(", ") || "Not listed"}
+                </strong>
+                <p>
+                  {selectedPackage.compatibility.runtimes.join(", ") || "No runtime listed"}
+                </p>
+              </div>
+              <div className="dialog-panel">
+                <span className="signal-label">Capabilities</span>
+                <strong>
+                  {selectedPackage.capabilities.provides.length} provided
+                </strong>
+                <p>
+                  Requires: {selectedPackage.capabilities.requires.join(", ") || "none"}
+                </p>
+              </div>
+              <div className="dialog-panel">
+                <span className="signal-label">Publisher</span>
+                <strong>{selectedPackage.trust.publisher}</strong>
+                <p>
+                  {selectedPackage.license} license - {formatDownloads(selectedPackage.downloads)} downloads
+                </p>
+              </div>
+            </div>
+
+            <div className="dialog-notice">
+              Inspection only. K-O Palace does not install or execute a package from this client.
+              Verify the publisher, signature, license, compatibility, and artifact source before
+              using another client to install it.
+            </div>
+
+            <div className="card-actions">
+              {selectedPackage.repository ? (
+                <a href={selectedPackage.repository} target="_blank" rel="noreferrer">
+                  Repository
+                </a>
+              ) : null}
+              {selectedPackage.homepage ? (
+                <a href={selectedPackage.homepage} target="_blank" rel="noreferrer">
+                  Homepage
+                </a>
+              ) : null}
+              {selectedPackage.artifact_url ? (
+                <a href={selectedPackage.artifact_url} target="_blank" rel="noreferrer">
+                  Artifact source
+                </a>
+              ) : null}
+            </div>
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

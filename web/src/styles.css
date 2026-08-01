@@ -163,7 +163,9 @@ a {
 .theme-toggle:focus,
 .mode-toggle button:focus,
 .chip:focus,
-.card-actions a:focus {
+.card-actions a:focus,
+.inspect-button:focus,
+.dialog-close:focus {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
   outline: none;
@@ -400,7 +402,9 @@ a {
   margin-bottom: 0;
 }
 
-.card-actions a {
+.card-actions a,
+.inspect-button,
+.dialog-close {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -470,5 +474,83 @@ a {
   .title-row {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgba(8, 14, 28, 0.62);
+}
+
+.package-dialog {
+  width: min(720px, 100%);
+  max-height: min(720px, calc(100vh - 2rem));
+  overflow: auto;
+  padding: 1.25rem;
+  background: var(--surface-strong);
+}
+
+.dialog-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.dialog-header h2 {
+  margin: 0.35rem 0 0;
+}
+
+.dialog-close {
+  cursor: pointer;
+}
+
+.dialog-description {
+  color: var(--text-soft);
+  line-height: 1.6;
+}
+
+.dialog-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.dialog-panel {
+  padding: 0.9rem;
+  background: var(--surface-muted);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+.dialog-panel strong {
+  display: block;
+  margin-top: 0.3rem;
+}
+
+.dialog-panel p {
+  margin: 0.45rem 0 0;
+  color: var(--text-soft);
+  line-height: 1.45;
+}
+
+.dialog-notice {
+  margin-top: 1rem;
+  padding: 0.9rem;
+  color: var(--text-soft);
+  line-height: 1.5;
+  background: var(--accent-soft);
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+}
+
+@media (max-width: 720px) {
+  .dialog-grid {
+    grid-template-columns: 1fr;
   }
 }

@@ -71,6 +71,8 @@ jobs:
         run: npm ci --prefix web
       - name: Build web client
         run: npm run build --prefix web
+      - name: Audit web dependencies
+        run: npm audit --prefix web --audit-level=high
 
   build:
     name: Build Release
