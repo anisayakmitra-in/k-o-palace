@@ -19,13 +19,14 @@ use crate::{
     request_id::request_id_middleware,
     resolve::{resolve_dependencies, ResolutionResponse, ResolveOptions},
     search::rank_results,
-    trust::transition_trust,
+    trust::transition_trust_with_policy,
     validation::{normalize_trust_level, validate_package},
 };
 use axum::{
+    body::Body,
     extract::{Path, Query, State},
-    http::StatusCode,
-    response::Redirect,
+    http::{header, HeaderValue, StatusCode},
+    response::Response,
     routing::{delete, get, patch, post},
     Json, Router,
 };
@@ -45,21 +46,23 @@ fn rate_limit_key(
     namespace: &str,
     trust_forwarded: bool,
 ) -> String {
-    let identity = headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| format!("auth:{value}"))
-        .or_else(|| {
-            trust_forwarded
-                .then(|| {
-                    headers
-                        .get("x-forwarded-for")
-                        .and_then(|value| value.to_str().ok())
-                        .map(|value| format!("forwarded:{value}"))
-                })
-                .flatten()
+    let identity = trust_forwarded
+        .then(|| {
+            headers
+                .get("x-forwarded-for")
+                .and_then(|value| value.to_str().ok())
+                .map(|value| format!("forwarded:{value}"))
         })
+        .flatten()
         .unwrap_or_else(|| "anonymous".into());
+    format!(
+        "{namespace}:{}",
+        crate::security::sha256_hex(identity.as_bytes())
+    )
+}
+
+fn publisher_rate_limit_key(auth: &AuthContext, namespace: &str) -> String {
+    let identity = format!("publisher:{}", auth.publisher.id);
     format!(
         "{namespace}:{}",
         crate::security::sha256_hex(identity.as_bytes())
@@ -367,24 +370,19 @@ async fn publish_package(
     headers: axum::http::HeaderMap,
     Json(mut pkg): Json<Package>,
 ) -> PalaceResult<(StatusCode, Json<Package>)> {
-    // Rate limit
-    let rl_key = rate_limit_key(
-        &headers,
-        "publish",
-        state.config.security.trust_forwarded_headers,
-    );
-    if let Err(retry) = state.rate_limiters.publish.check(&rl_key).await {
-        return Err(PalaceError::new(
-            PalaceErrorCode::RateLimited,
-            format!("rate limit exceeded, retry after {retry}s"),
-        ));
-    }
-
     let auth = authenticate_header(&state, &headers).await?;
     if !auth.can_publish() {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
             "insufficient role to publish",
+        ));
+    }
+
+    let rl_key = publisher_rate_limit_key(&auth, "publish");
+    if let Err(retry) = state.rate_limiters.publish.check(&rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
         ));
     }
 
@@ -506,14 +504,25 @@ async fn transition_package_trust(
     Json(req): Json<TrustTransitionRequest>,
 ) -> PalaceResult<Json<crate::models::TrustTransition>> {
     let auth = authenticate_header(&state, &headers).await?;
-    let transition = transition_trust(&state.repo, &auth, &id, req.level, req.reason).await?;
+    let transition = transition_trust_with_policy(
+        &state.repo,
+        &auth,
+        &id,
+        req.level,
+        req.reason,
+        state
+            .config
+            .registry
+            .require_signatures_for_verified_and_above,
+    )
+    .await?;
     Ok(Json(transition))
 }
 async fn download_package(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-) -> PalaceResult<Redirect> {
+) -> PalaceResult<Response> {
     // Rate limit
     let rl_key = rate_limit_key(
         &headers,
@@ -544,7 +553,7 @@ async fn download_package(
     })?;
 
     crate::artifact::validate_artifact_url(&artifact_url, &state.config)?;
-    crate::artifact::fetch_and_verify_package_artifact(
+    let (content, content_type) = crate::artifact::fetch_and_verify_package_artifact_content(
         &artifact_url,
         &package.trust,
         &state.config,
@@ -557,8 +566,18 @@ async fn download_package(
         .record_download_with_context(&id, &package.version, Some(&dedupe_key))
         .await?;
 
-    // Redirect to the artifact URL
-    Ok(Redirect::temporary(&artifact_url))
+    let mut response = Response::new(Body::from(content));
+    let content_type = content_type
+        .as_deref()
+        .and_then(|value| HeaderValue::from_str(value).ok())
+        .unwrap_or_else(|| HeaderValue::from_static("application/octet-stream"));
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    Ok(response)
 }
 
 async fn list_reviews(
@@ -582,19 +601,13 @@ async fn add_review(
         ));
     }
 
-    let rl_key = rate_limit_key(
-        &headers,
-        "review",
-        state.config.security.trust_forwarded_headers,
-    );
+    let rl_key = publisher_rate_limit_key(&auth, "review");
     if let Err(retry) = state.rate_limiters.review.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
             format!("rate limit exceeded, retry after {retry}s"),
         ));
     }
-
-    let auth = authenticate_header(&state, &headers).await?;
     state.repo.get_package(&id).await?;
     if req
         .comment
@@ -824,11 +837,7 @@ async fn create_token_handler(
             "token lacks tokens:manage scope",
         ));
     }
-    let rl_key = rate_limit_key(
-        &headers,
-        "token-management",
-        state.config.security.trust_forwarded_headers,
-    );
+    let rl_key = publisher_rate_limit_key(&auth, "token-management");
     if let Err(retry) = state.rate_limiters.auth.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,

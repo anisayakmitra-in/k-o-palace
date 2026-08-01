@@ -551,6 +551,31 @@ pub async fn fetch_and_verify_package_artifact(
     fetch_and_verify_package_artifact_streaming(url, trust, config).await
 }
 
+/// Fetch and verify an artifact before returning the exact verified bytes.
+#[cfg(feature = "reqwest")]
+pub async fn fetch_and_verify_package_artifact_content(
+    url: &str,
+    trust: &TrustInfo,
+    config: &PalaceConfig,
+) -> PalaceResult<(Vec<u8>, Option<String>)> {
+    let artifact = fetch_artifact(url, config).await?;
+    verify_artifact_content(&artifact.content, artifact.content_type.clone(), trust)?;
+    Ok((artifact.content, artifact.content_type))
+}
+
+/// Fetch-and-verify content stub when HTTP fetching is not enabled.
+#[cfg(not(feature = "reqwest"))]
+pub async fn fetch_and_verify_package_artifact_content(
+    _url: &str,
+    _trust: &TrustInfo,
+    _config: &PalaceConfig,
+) -> PalaceResult<(Vec<u8>, Option<String>)> {
+    Err(PalaceError::new(
+        PalaceErrorCode::NotImplemented,
+        "reqwest feature not enabled",
+    ))
+}
+
 /// Fetch-and-verify stub when HTTP fetching is not enabled.
 #[cfg(not(feature = "reqwest"))]
 pub async fn fetch_and_verify_package_artifact(

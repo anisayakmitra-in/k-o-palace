@@ -97,13 +97,46 @@ pub fn can_transition(from: TrustLevel, to: TrustLevel) -> bool {
         .unwrap_or(false)
 }
 
-/// Apply a trust transition, enforcing authorization and recording audit.
+/// Apply a trust transition with the default library policy.
 pub async fn transition_trust(
     repo: &crate::repository::PackageRepository,
     actor: &AuthContext,
     package_id: &str,
     new_level: TrustLevel,
     reason: Option<String>,
+) -> PalaceResult<TrustTransition> {
+    transition_trust_inner(repo, actor, package_id, new_level, reason, false, false).await
+}
+
+/// Apply a trust transition with an explicit signature policy.
+pub async fn transition_trust_with_policy(
+    repo: &crate::repository::PackageRepository,
+    actor: &AuthContext,
+    package_id: &str,
+    new_level: TrustLevel,
+    reason: Option<String>,
+    require_signatures: bool,
+) -> PalaceResult<TrustTransition> {
+    transition_trust_inner(
+        repo,
+        actor,
+        package_id,
+        new_level,
+        reason,
+        require_signatures,
+        true,
+    )
+    .await
+}
+
+async fn transition_trust_inner(
+    repo: &crate::repository::PackageRepository,
+    actor: &AuthContext,
+    package_id: &str,
+    new_level: TrustLevel,
+    reason: Option<String>,
+    require_signatures: bool,
+    require_publisher_identity: bool,
 ) -> PalaceResult<TrustTransition> {
     if !actor.can_moderate() && !actor.can_administer() {
         return Err(PalaceError::new(
@@ -132,6 +165,21 @@ pub async fn transition_trust(
                     "publisher verification is required for server-assigned trust levels",
                 ));
             }
+        } else if require_publisher_identity {
+            return Err(PalaceError::new(
+                PalaceErrorCode::TrustTransitionDenied,
+                "publisher identity is required for server-assigned trust levels",
+            ));
+        }
+        if require_signatures
+            && (package.trust.content_hash.is_none()
+                || package.trust.signature.is_none()
+                || package.trust.public_key.is_none())
+        {
+            return Err(PalaceError::new(
+                PalaceErrorCode::TrustTransitionDenied,
+                "a verified artifact signature is required for server-assigned trust levels",
+            ));
         }
     }
     if !can_transition(current.clone(), new_level.clone()) {

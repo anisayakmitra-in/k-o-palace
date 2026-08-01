@@ -4,7 +4,7 @@ use chrono::Utc;
 use k_o_palace::{
     auth::AuthContext,
     models::{Publisher, PublisherVerification, Role, TrustInfo, TrustLevel},
-    trust::{can_transition, transition_trust, verify_signature},
+    trust::{can_transition, transition_trust, transition_trust_with_policy, verify_signature},
 };
 use uuid::Uuid;
 
@@ -292,6 +292,21 @@ async fn server_assigned_trust_requires_verified_publisher() {
     .await
     .unwrap();
 
+    let signature_rejected = transition_trust_with_policy(
+        &repo,
+        &context,
+        "owned.gene",
+        TrustLevel::Verified,
+        Some("signature required".into()),
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        signature_rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+
     let transition = transition_trust(
         &repo,
         &context,
@@ -302,4 +317,25 @@ async fn server_assigned_trust_requires_verified_publisher() {
     .await
     .unwrap();
     assert_eq!(transition.to_level, "verified");
+
+    let mut orphan = package.clone();
+    orphan.id = "orphaned.gene".into();
+    orphan.author = "missing-owner".into();
+    orphan.trust.publisher = "missing-owner".into();
+    repo.publish_package(&orphan).await.unwrap();
+
+    let orphan_rejected = transition_trust_with_policy(
+        &repo,
+        &context,
+        "orphaned.gene",
+        TrustLevel::Verified,
+        Some("publisher required".into()),
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        orphan_rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
 }
