@@ -1,6 +1,7 @@
 //! API integration tests.
 
 use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use k_o_palace::{
@@ -13,12 +14,31 @@ use k_o_palace::{
     },
     routes::router,
 };
+use k_o_palace::rate_limit::{RateLimiter, RateLimiters};
+use std::{net::SocketAddr, sync::Arc};
 use tower::ServiceExt;
 use uuid::Uuid;
 
 fn test_state() -> AppState {
     let config = PalaceConfig::default();
     AppState::in_memory(config)
+}
+
+
+fn read_limited_state(trust_forwarded_headers: bool) -> AppState {
+    let mut config = PalaceConfig::default();
+    config.security.trust_forwarded_headers = trust_forwarded_headers;
+    let mut state = AppState::in_memory(config);
+    state.rate_limiters = Arc::new(RateLimiters {
+        publish: RateLimiter::new(10),
+        search: RateLimiter::new(10),
+        download: RateLimiter::new(10),
+        review: RateLimiter::new(10),
+        auth: RateLimiter::new(10),
+        resolve: RateLimiter::new(10),
+        read: RateLimiter::new(1),
+    });
+    state
 }
 
 fn valid_pkg(id: impl Into<String>) -> Package {
@@ -767,4 +787,56 @@ async fn publisher_cannot_publish_under_another_namespace() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn untrusted_peer_cannot_rotate_forwarded_ips_to_bypass_public_read_limit() {
+    let app = router(read_limited_state(true));
+    let peer: SocketAddr = "203.0.113.10:41000".parse().unwrap();
+
+    let mut first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1")
+        .body(Body::empty())
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    let first = app.clone().oneshot(first).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let mut second = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.2")
+        .body(Body::empty())
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    let second = app.oneshot(second).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn oversized_trust_transition_reason_is_rejected() {
+    let state = test_state();
+    let (_moderator, token) = register_moderator(&state, "trust-moderator").await;
+    state
+        .repo
+        .publish_package(&valid_pkg("trust.reason"))
+        .await
+        .unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/packages/trust.reason/trust")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "level": "community",
+                        "reason": "x".repeat(501),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

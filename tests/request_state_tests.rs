@@ -1,6 +1,9 @@
 //! Regression tests for bounded request state and pagination arithmetic.
 
-use k_o_palace::{pagination::Pagination, rate_limit::RateLimiter};
+use k_o_palace::{
+    pagination::{Pagination, MAX_OFFSET},
+    rate_limit::RateLimiter,
+};
 
 #[tokio::test]
 async fn rate_limiter_keeps_independent_keys_independent() {
@@ -32,6 +35,13 @@ fn bounds_saturate_at_usize_max() {
 #[test]
 fn offset_rejects_values_that_would_not_fit_database_integer() {
     let result = Pagination::new(1, i64::MAX as usize + 1);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn offset_rejects_pathological_but_database_safe_values() {
+    let result = Pagination::new(1, MAX_OFFSET + 1);
 
     assert!(result.is_err());
 }

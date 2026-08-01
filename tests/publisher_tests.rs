@@ -447,3 +447,59 @@ async fn reserved_publisher_namespace_is_rejected() {
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
 }
+
+#[tokio::test]
+async fn oversized_registration_fields_are_rejected() {
+    let cases = [
+        serde_json::json!({"name": "longdisplay", "display_name": "x".repeat(129)}),
+        serde_json::json!({"name": "longemail", "display_name": "Long Email", "email": format!("{}@example.com", "x".repeat(244))}),
+        serde_json::json!({"name": "longwebsite", "display_name": "Long Website", "website": format!("https://example.com/{}", "x".repeat(2030))}),
+    ];
+
+    for body in cases {
+        let response = router(test_state())
+            .oneshot(
+                Request::post("/api/v1/publishers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn token_scope_count_is_bounded_before_delegation() {
+    let state = test_state();
+    let (_, token) = k_o_palace::auth::register_publisher(
+        &state.repo,
+        "scopebounds",
+        "Scope Bounds",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/tokens")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "too-many",
+                        "scopes": vec!["packages:read"; 8],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
