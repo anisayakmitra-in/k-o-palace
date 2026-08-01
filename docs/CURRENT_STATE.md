@@ -37,9 +37,9 @@ The current migrations and adapter persist package ownership and trust state, an
 ### Access and social features
 
 - Publisher registration is unauthenticated and immediately issues a publishing token. There is no identity-verification, invitation, or anti-abuse flow.
-- Tokens have no scopes, expiry input, last-used update, or separate administrative management policy.
+- Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes remain unrestricted for compatibility; new tokens should request least privilege.
 
-- Rate limits use one static key per endpoint. They are not per user, IP address, or trusted proxy identity.
+- Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; a distributed deployment still needs a shared limiter.
 - Reviews can be created, but there is no one-review policy, edit/delete flow, moderation route, or reputation calculation.
 - Discovery endpoints exist, but featured and trending use simple stored package fields. Download events and anti-manipulation rules are not implemented.
 - There is no web client, user feed, follow graph, post model, media system, notification system, or moderation workflow.

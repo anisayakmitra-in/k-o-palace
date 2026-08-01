@@ -150,7 +150,9 @@ Artifacts must be served over HTTPS from an allowlisted host. Default allowed ho
 - `github.com`
 - `objects.githubusercontent.com`
 
-Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable.
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable.Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND`, `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, and `PALACE_TRUST_PROXY_HEADERS`. Forwarded headers must only be enabled behind a proxy that overwrites them.
+
+API tokens can request `packages:read`, `packages:publish`, `packages:write`, `tokens:manage`, `moderation:write`, or `admin:write` scopes and may include an `expires_at` timestamp. New tokens are addressable by their token ID; older tokens continue through the compatibility verifier.
 
 ## Trust Review
 

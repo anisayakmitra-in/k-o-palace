@@ -371,9 +371,17 @@ impl InMemoryRepository {
 
     pub async fn add_review(&self, review: &Review) -> PalaceResult<Review> {
         let mut map = self.reviews.write().await;
-        map.entry(review.package_id.clone())
-            .or_default()
-            .push(review.clone());
+        let reviews = map.entry(review.package_id.clone()).or_default();
+        if reviews
+            .iter()
+            .any(|existing| existing.reviewer_id == review.reviewer_id)
+        {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Conflict,
+                "publisher has already reviewed this package",
+            ));
+        }
+        reviews.push(review.clone());
         Ok(review.clone())
     }
 

@@ -464,6 +464,18 @@ async fn add_review(
     Json(req): Json<ReviewRequest>,
 ) -> PalaceResult<(StatusCode, Json<Review>)> {
     let auth = authenticate_header(&state, &headers).await?;
+    state.repo.get_package(&id).await?;
+    if req
+        .comment
+        .as_ref()
+        .is_some_and(|comment| comment.len() > 4000)
+    {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            "review comment must be at most 4000 characters",
+        ));
+    }
+
     if req.rating < 1 || req.rating > 5 {
         return Err(PalaceError::new(
             PalaceErrorCode::BadRequest,

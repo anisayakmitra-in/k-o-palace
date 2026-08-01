@@ -692,18 +692,24 @@ impl PostgresRepository {
 
     pub async fn add_review(&self, review: &Review) -> PalaceResult<Review> {
         let id = uuid::Uuid::now_v7();
-        sqlx::query(
-            "INSERT INTO reviews (id, package_id, publisher_id, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5, $6)"
+        let result = sqlx::query(
+            "INSERT INTO reviews (id, package_id, publisher_id, rating, comment, created_at) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT (package_id, publisher_id) DO NOTHING",
         )
         .bind(id)
         .bind(&review.package_id)
         .bind(review.reviewer_id)
         .bind(review.rating)
-        .bind(&review.comment)
+        .bind(review.comment.clone().unwrap_or_default())
         .bind(review.created_at)
         .execute(&self.pool)
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Conflict,
+                "publisher has already reviewed this package",
+            ));
+        }
 
         Ok(Review {
             id,
