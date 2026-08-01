@@ -518,7 +518,7 @@ async fn update_package(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
     Path(id): Path<String>,
-    Json(mut pkg): Json<Package>,
+    Json(_pkg): Json<Package>,
 ) -> PalaceResult<Json<Package>> {
     let auth = authenticate_header(&state, &headers).await?;
     if !auth.has_scope("packages:write") {
@@ -527,22 +527,11 @@ async fn update_package(
             "token lacks packages:write scope",
         ));
     }
-    let existing = state.repo.get_package(&id).await?;
-    let owner_id = state.repo.get_package_publisher_id(&id).await?;
-    let owns = owner_id == Some(auth.publisher.id) || auth.can_administer();
-    if !owns {
-        return Err(PalaceError::new(
-            PalaceErrorCode::Forbidden,
-            "only the publisher or admin can update this package",
-        ));
-    }
-
-    validate_package(&pkg)?;
-    pkg.author = existing.author.clone();
-    pkg.trust.publisher = existing.trust.publisher.clone();
-    pkg.trust.level = existing.trust.level.clone();
-    pkg.id = id;
-    Ok(Json(state.repo.update_package(&pkg).await?))
+    state.repo.get_package(&id).await?;
+    Err(PalaceError::new(
+        PalaceErrorCode::ImmutableVersion,
+        "published package versions cannot be updated",
+    ))
 }
 
 async fn delete_package(
