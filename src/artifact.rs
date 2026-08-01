@@ -2,6 +2,7 @@
 
 use crate::config::{PalaceConfig, StorageBackend};
 use crate::error::{PalaceError, PalaceErrorCode, PalaceResult};
+use crate::models::TrustInfo;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use url::Url;
@@ -129,6 +130,31 @@ pub fn compute_content_hash(content: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Verify fetched artifact bytes against the package trust metadata.
+pub fn verify_artifact_content(
+    content: &[u8],
+    content_type: Option<String>,
+    trust: &TrustInfo,
+) -> PalaceResult<ArtifactInfo> {
+    crate::trust::verify_content_hash(content, trust)?;
+
+    match (&trust.signature, &trust.public_key) {
+        (None, None) => {}
+        (Some(_), Some(_)) => crate::trust::verify_signature(trust, content)?,
+        _ => {
+            return Err(PalaceError::new(
+                PalaceErrorCode::SignatureInvalid,
+                "signature and public_key must be provided together",
+            ));
+        }
+    }
+
+    Ok(ArtifactInfo {
+        content_type,
+        size: content.len(),
+        hash: compute_content_hash(content),
+    })
+}
 /// Fetch artifact content with redirect, destination, and size enforcement.
 #[cfg(feature = "reqwest")]
 pub async fn fetch_with_redirect_limit(url: &str, max_redirects: u32) -> PalaceResult<Vec<u8>> {
@@ -294,6 +320,30 @@ pub async fn fetch_and_verify_with_config(
 pub async fn fetch_and_verify_with_config(
     _url: &str,
     _expected_hash: Option<&str>,
+    _config: &PalaceConfig,
+) -> PalaceResult<ArtifactInfo> {
+    Err(PalaceError::new(
+        PalaceErrorCode::NotImplemented,
+        "reqwest feature not enabled",
+    ))
+}
+
+/// Fetch an artifact and verify the declared package digest and signature.
+#[cfg(feature = "reqwest")]
+pub async fn fetch_and_verify_package_artifact(
+    url: &str,
+    trust: &TrustInfo,
+    config: &PalaceConfig,
+) -> PalaceResult<ArtifactInfo> {
+    let artifact = fetch_artifact(url, config).await?;
+    verify_artifact_content(&artifact.content, artifact.content_type, trust)
+}
+
+/// Fetch-and-verify stub when HTTP fetching is not enabled.
+#[cfg(not(feature = "reqwest"))]
+pub async fn fetch_and_verify_package_artifact(
+    _url: &str,
+    _trust: &TrustInfo,
     _config: &PalaceConfig,
 ) -> PalaceResult<ArtifactInfo> {
     Err(PalaceError::new(

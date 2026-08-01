@@ -28,7 +28,7 @@ The current migration and adapter pass the database-backed core-record integrati
 
 ### Publication and artifacts
 
-- The publish route requires a declared digest for an artifact URL, but does not yet fetch the artifact, verify its supplied digest or signature, or persist artifact metadata.
+- The publish route requires a declared digest and verifies fetched artifact bytes and any supplied signature before the package write, but does not yet persist artifact metadata transactionally.
 - `fetch_and_verify` is a library helper behind the optional `reqwest` feature. It is not part of the publish transaction.
 - Artifact fetches buffer the response before enforcing the size limit. Redirect targets are not revalidated against the artifact-host policy.
 - Both persistence backends reject an existing `(id, version)` as an immutable release.

@@ -279,6 +279,11 @@ async fn publish_package(
         ));
     }
 
+    if let Some(artifact_url) = &pkg.artifact_url {
+        crate::artifact::fetch_and_verify_package_artifact(artifact_url, &pkg.trust, &state.config)
+            .await?;
+    }
+
     let package = state.repo.publish_package(&pkg).await?;
     Ok((StatusCode::CREATED, Json(package)))
 }

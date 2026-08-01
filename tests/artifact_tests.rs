@@ -1,6 +1,10 @@
 //! Artifact host validation and security tests.
 
-use k_o_palace::{artifact::validate_artifact_url, config::PalaceConfig};
+use k_o_palace::{
+    artifact::{validate_artifact_url, verify_artifact_content},
+    config::PalaceConfig,
+    models::{TrustInfo, TrustLevel},
+};
 
 #[cfg(feature = "reqwest")]
 use k_o_palace::{artifact::fetch_and_verify_with_config, error::PalaceErrorCode};
@@ -84,4 +88,38 @@ fn content_hash_computes_correctly() {
         hash,
         "b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9"
     );
+}
+
+#[test]
+fn verified_artifact_content_requires_the_declared_digest() {
+    let trust = TrustInfo {
+        level: TrustLevel::Community,
+        signature: None,
+        public_key: None,
+        content_hash: Some(
+            "sha256:b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9".into(),
+        ),
+        publisher: "test".into(),
+    };
+
+    let info =
+        verify_artifact_content(b"hello world", Some("application/gzip".into()), &trust).unwrap();
+    assert_eq!(info.size, 11);
+    assert_eq!(info.content_type.as_deref(), Some("application/gzip"));
+}
+
+#[test]
+fn verified_artifact_content_rejects_a_digest_mismatch() {
+    let trust = TrustInfo {
+        level: TrustLevel::Community,
+        signature: None,
+        public_key: None,
+        content_hash: Some(
+            "sha256:0000000000000000000000000000000000000000000000000000000000000000".into(),
+        ),
+        publisher: "test".into(),
+    };
+
+    let error = verify_artifact_content(b"hello world", None, &trust).unwrap_err();
+    assert_eq!(error.code, k_o_palace::error::PalaceErrorCode::HashMismatch);
 }
