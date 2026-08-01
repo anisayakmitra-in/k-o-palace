@@ -50,14 +50,19 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - PostgreSQL 14+ (for production mode)
 - Node.js 18+ (only if modifying the frontend, if any)
 
-### Quick Start (In-Memory)
+### Quick Start (PostgreSQL)
 
 ```bash
-cargo run
+DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run
 ```
 
-The server binds to `127.0.0.1:3001` by default.
+The default build uses PostgreSQL and runs migrations at startup. The server binds to `127.0.0.1:3001` by default.
 
+For local API experiments without durable storage, use the explicit development build:
+
+```bash
+cargo run --no-default-features
+```
 ### Environment Variables
 
 | Variable | Default | Description |
@@ -76,7 +81,7 @@ psql kopalace -c "CREATE USER kopalace WITH PASSWORD 'kopalace';"
 psql kopalace -c "GRANT ALL ON DATABASE kopalace TO kopalace;"
 
 # Run migrations
-DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run --features postgres
+DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run
 ```
 
 ### Migrations
