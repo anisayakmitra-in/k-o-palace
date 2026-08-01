@@ -146,6 +146,7 @@ async fn trust_transition_updates_all_versions_in_memory() {
     })
     .await
     .unwrap();
+    let publisher_id = publisher.id;
 
     let mut first = Package {
         id: "versions.gene".into(),
@@ -176,9 +177,13 @@ async fn trust_transition_updates_all_versions_in_memory() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    repo.publish_package(&first).await.unwrap();
+    repo.publish_verified_package(&first, None, Some(publisher_id))
+        .await
+        .unwrap();
     first.version = "2.0.0".into();
-    repo.publish_package(&first).await.unwrap();
+    repo.publish_verified_package(&first, None, Some(publisher_id))
+        .await
+        .unwrap();
 
     let ctx = AuthContext {
         publisher,
@@ -419,7 +424,9 @@ async fn server_assigned_trust_rejects_client_supplied_signature_metadata() {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     };
-    repo.publish_package(&package).await.unwrap();
+    repo.publish_verified_package(&package, None, Some(owner.id))
+        .await
+        .unwrap();
 
     let context = AuthContext {
         publisher: moderator,
