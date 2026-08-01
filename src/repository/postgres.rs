@@ -653,7 +653,7 @@ impl PostgresRepository {
         .bind(event.actor_id)
         .bind(event.package_id.as_ref().map(|_| "package"))
         .bind(&event.package_id)
-        .bind(&event.details)
+        .bind(event.details.clone().unwrap_or_else(|| serde_json::json!({})))
         .bind(event.created_at)
         .execute(&self.pool)
         .await
