@@ -386,31 +386,18 @@ impl PostgresRepository {
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
     }
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
-        let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
-            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE revoked_at IS NULL"
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
-
-        for row in rows {
-            if bcrypt::verify(plaintext.as_bytes(), &row.2).unwrap_or(false) {
-                return Ok(ApiToken {
-                    id: row.0,
-                    publisher_id: row.1,
-                    token_hash: row.2,
-                    name: row.3,
-                    created_at: row.4,
-                    revoked_at: row.5,
-                    expires_at: row.6,
-                    scopes: serde_json::from_value(row.7).unwrap_or_default(),
-                });
-            }
+        let id = crate::repository::token_id_from_opaque(plaintext).ok_or_else(|| {
+            PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
+        })?;
+        let token = self.get_api_token_by_id(id).await?;
+        if bcrypt::verify(plaintext.as_bytes(), &token.token_hash).unwrap_or(false) {
+            Ok(token)
+        } else {
+            Err(PalaceError::new(
+                PalaceErrorCode::Unauthorized,
+                "invalid or revoked token",
+            ))
         }
-        Err(PalaceError::new(
-            PalaceErrorCode::Unauthorized,
-            "invalid or revoked token",
-        ))
     }
 
     pub async fn get_api_token_by_id(&self, id: Uuid) -> PalaceResult<ApiToken> {

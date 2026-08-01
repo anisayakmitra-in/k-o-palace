@@ -12,6 +12,7 @@ pub const SUPPORTED_SCOPES: &[&str] = &[
     "packages:publish",
     "packages:write",
     "tokens:manage",
+    "reviews:write",
     "moderation:write",
     "admin:write",
 ];
@@ -22,6 +23,7 @@ pub const DEFAULT_PUBLISHER_SCOPES: &[&str] = &[
     "packages:publish",
     "packages:write",
     "tokens:manage",
+    "reviews:write",
 ];
 
 /// Authenticated context extracted from an API token.
@@ -34,11 +36,9 @@ pub struct AuthContext {
 
 impl AuthContext {
     pub fn has_scope(&self, scope: &str) -> bool {
-        self.scopes.is_empty()
-            || self
-                .scopes
-                .iter()
-                .any(|value| value == "*" || value == scope)
+        self.scopes
+            .iter()
+            .any(|value| value == "*" || value == scope)
     }
 
     pub fn can_publish(&self) -> bool {
@@ -51,6 +51,12 @@ impl AuthContext {
 
     pub fn can_administer(&self) -> bool {
         self.publisher.role.can_administer() && self.has_scope("admin:write")
+    }
+
+    pub fn can_issue_scope(&self, scope: &str) -> bool {
+        self.has_scope(scope)
+            || (scope == "moderation:write" && self.publisher.role.can_moderate())
+            || (scope == "admin:write" && self.publisher.role.can_administer())
     }
 
     pub fn owns(&self, package_publisher: &str) -> bool {
@@ -86,17 +92,16 @@ async fn verify_token(
     repo: &crate::repository::PackageRepository,
     token: &str,
 ) -> PalaceResult<AuthContext> {
-    let token_id = token
-        .strip_prefix("kop_")
-        .and_then(|value| Uuid::parse_str(value).ok());
-    let api_token = if let Some(id) = token_id {
-        match repo.get_api_token_by_id(id).await {
-            Ok(token) => token,
-            Err(_) => repo.get_api_token_by_plaintext(token).await?,
-        }
-    } else {
-        repo.get_api_token_by_plaintext(token).await?
-    };
+    let token_id = crate::repository::token_id_from_opaque(token).ok_or_else(|| {
+        PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
+    })?;
+    let api_token = repo.get_api_token_by_id(token_id).await?;
+    if !constant_time_verify(token, &api_token.token_hash) {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Unauthorized,
+            "invalid or revoked token",
+        ));
+    }
 
     if let Some(expires) = api_token.expires_at {
         if expires <= Utc::now() {
@@ -154,7 +159,7 @@ fn prepare_api_token(
     }
     let scopes = validate_scopes(&scopes)?;
     let id = Uuid::new_v4();
-    let plaintext = format!("kop_{}", id.simple());
+    let plaintext = format!("kop_{}_{}", id.simple(), Uuid::new_v4().simple());
     let token = ApiToken {
         id,
         publisher_id,
@@ -238,12 +243,7 @@ pub async fn register_publisher(
     website: Option<String>,
 ) -> PalaceResult<(Publisher, String)> {
     let name = name.into();
-    if name.is_empty() || name.len() > 64 {
-        return Err(PalaceError::new(
-            PalaceErrorCode::ValidationFailed,
-            "publisher name must be 1-64 characters",
-        ));
-    }
+    crate::identity::validate_namespace(&name)?;
     let publisher = Publisher {
         id: Uuid::new_v4(),
         name: name.clone(),

@@ -390,16 +390,20 @@ async fn publish_package(
 
     validate_package(&pkg)?;
 
+    if pkg.id.contains('/') {
+        pkg.id = crate::identity::normalize_id(&pkg.id)?;
+        let namespace = crate::identity::namespace_of(&pkg.id);
+        if namespace != auth.publisher.name && !auth.can_administer() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Forbidden,
+                "cannot publish under another publisher namespace",
+            ));
+        }
+    }
+
     pkg.trust.level = normalize_trust_level(Some(pkg.trust.level.as_str()));
     pkg.author = auth.publisher.name.clone();
     pkg.trust.publisher = auth.publisher.name.clone();
-
-    if !auth.owns(&pkg.trust.publisher) {
-        return Err(PalaceError::new(
-            PalaceErrorCode::Forbidden,
-            "cannot publish under another publisher",
-        ));
-    }
 
     if pkg.artifact_url.is_some() && pkg.trust.content_hash.is_none() {
         return Err(PalaceError::new(
@@ -441,6 +445,12 @@ async fn update_package(
     Json(mut pkg): Json<Package>,
 ) -> PalaceResult<Json<Package>> {
     let auth = authenticate_header(&state, &headers).await?;
+    if !auth.has_scope("packages:write") {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token lacks packages:write scope",
+        ));
+    }
     let existing = state.repo.get_package(&id).await?;
     let owner_id = state.repo.get_package_publisher_id(&id).await?;
     let owns = owner_id
@@ -467,12 +477,18 @@ async fn delete_package(
     Path(id): Path<String>,
 ) -> PalaceResult<StatusCode> {
     let auth = authenticate_header(&state, &headers).await?;
+    if !auth.has_scope("packages:write") && !auth.can_moderate() && !auth.can_administer() {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token lacks package deletion scope",
+        ));
+    }
     let existing = state.repo.get_package(&id).await?;
     let owner_id = state.repo.get_package_publisher_id(&id).await?;
     let owns = owner_id
         .map(|owner| owner == auth.publisher.id)
         .unwrap_or_else(|| auth.owns(&existing.trust.publisher));
-    if !owns && !auth.can_moderate() {
+    if !owns && !auth.can_moderate() && !auth.can_administer() {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
             "only the publisher or moderator can delete this package",
@@ -558,6 +574,14 @@ async fn add_review(
     Path(id): Path<String>,
     Json(req): Json<ReviewRequest>,
 ) -> PalaceResult<(StatusCode, Json<Review>)> {
+    let auth = authenticate_header(&state, &headers).await?;
+    if !auth.has_scope("reviews:write") {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token lacks reviews:write scope",
+        ));
+    }
+
     let rl_key = rate_limit_key(
         &headers,
         "review",
@@ -794,6 +818,12 @@ async fn create_token_handler(
     Json(req): Json<TokenCreateRequest>,
 ) -> PalaceResult<(StatusCode, Json<TokenCreateResponse>)> {
     let auth = authenticate_header(&state, &headers).await?;
+    if !auth.has_scope("tokens:manage") {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token lacks tokens:manage scope",
+        ));
+    }
     let rl_key = rate_limit_key(
         &headers,
         "token-management",
@@ -806,25 +836,19 @@ async fn create_token_handler(
         ));
     }
 
-    let scopes = if req.scopes.is_empty() {
+    let scopes: Vec<String> = if req.scopes.is_empty() {
         DEFAULT_PUBLISHER_SCOPES
             .iter()
+            .filter(|scope| auth.can_issue_scope(scope))
             .map(|scope| (*scope).into())
             .collect()
     } else {
         req.scopes.clone()
     };
-    if scopes.iter().any(|scope| scope == "admin:write") && !auth.publisher.role.can_administer() {
+    if scopes.iter().any(|scope| !auth.can_issue_scope(scope)) {
         return Err(PalaceError::new(
             PalaceErrorCode::Forbidden,
-            "only administrators can issue admin tokens",
-        ));
-    }
-    if scopes.iter().any(|scope| scope == "moderation:write") && !auth.publisher.role.can_moderate()
-    {
-        return Err(PalaceError::new(
-            PalaceErrorCode::Forbidden,
-            "only moderators can issue moderation tokens",
+            "token cannot grant a scope it does not hold",
         ));
     }
     let audit = crate::models::AuditEvent {
@@ -860,6 +884,12 @@ async fn list_tokens(
     headers: axum::http::HeaderMap,
 ) -> PalaceResult<Json<Vec<TokenResponse>>> {
     let auth = authenticate_header(&state, &headers).await?;
+    if !auth.has_scope("tokens:manage") {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token lacks tokens:manage scope",
+        ));
+    }
     let tokens = state.repo.list_api_tokens(auth.publisher.id).await?;
     Ok(Json(tokens.into_iter().map(Into::into).collect()))
 }
@@ -870,6 +900,12 @@ async fn revoke_token_handler(
     Path(id): Path<uuid::Uuid>,
 ) -> PalaceResult<StatusCode> {
     let auth = authenticate_header(&state, &headers).await?;
+    if !auth.has_scope("tokens:manage") {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "token lacks tokens:manage scope",
+        ));
+    }
 
     // Verify ownership: the token must belong to the authenticated publisher
     let tokens = state.repo.list_api_tokens(auth.publisher.id).await?;

@@ -652,3 +652,25 @@ async fn dependency_resolution_endpoint_returns_capability_graph() {
         Some("database.package")
     );
 }
+
+#[tokio::test]
+async fn publisher_cannot_publish_under_another_namespace() {
+    let state = test_state();
+    let (_publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let package = valid_pkg("other/package");
+
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}

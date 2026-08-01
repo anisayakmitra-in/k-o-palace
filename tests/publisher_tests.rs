@@ -362,3 +362,88 @@ async fn duplicate_authorization_headers_are_rejected() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn token_id_without_secret_cannot_authenticate() {
+    let state = test_state();
+    let (publisher, _token) =
+        k_o_palace::auth::register_publisher(&state.repo, "opaqueid", "Opaque ID", None, None)
+            .await
+            .unwrap();
+    let token_id = state
+        .repo
+        .list_api_tokens(publisher.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id;
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/tokens")
+                .header("authorization", format!("Bearer kop_{}", token_id.simple()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn read_only_token_cannot_manage_tokens() {
+    let state = test_state();
+    let (_publisher, owner_token) =
+        k_o_palace::auth::register_publisher(&state.repo, "readonly", "Read Only", None, None)
+            .await
+            .unwrap();
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/tokens")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {owner_token}"))
+                .body(Body::from(
+                    r#"{"name":"read-only","scopes":["packages:read"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let read_only_token = json["token"].as_str().unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/tokens")
+                .header("authorization", format!("Bearer {read_only_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reserved_publisher_namespace_is_rejected() {
+    let response = router(test_state())
+        .oneshot(
+            Request::post("/api/v1/publishers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"admin","display_name":"Reserved"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}

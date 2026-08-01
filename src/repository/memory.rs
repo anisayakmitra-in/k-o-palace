@@ -156,16 +156,18 @@ impl InMemoryRepository {
     }
 
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
-        let map = self.tokens.read().await;
-        map.values()
-            .find(|t| {
-                t.revoked_at.is_none()
-                    && bcrypt::verify(plaintext.as_bytes(), &t.token_hash).unwrap_or(false)
-            })
-            .cloned()
-            .ok_or_else(|| {
-                PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
-            })
+        let id = crate::repository::token_id_from_opaque(plaintext).ok_or_else(|| {
+            PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
+        })?;
+        let token = self.get_api_token_by_id(id).await?;
+        if bcrypt::verify(plaintext.as_bytes(), &token.token_hash).unwrap_or(false) {
+            Ok(token)
+        } else {
+            Err(PalaceError::new(
+                PalaceErrorCode::Unauthorized,
+                "invalid or revoked token",
+            ))
+        }
     }
 
     pub async fn revoke_api_token(&self, id: Uuid) -> PalaceResult<()> {

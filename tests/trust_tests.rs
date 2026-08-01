@@ -102,7 +102,7 @@ async fn moderator_can_transition_trust() {
     let ctx = AuthContext {
         publisher: publisher.clone(),
         token_id: Uuid::new_v4(),
-        scopes: vec![],
+        scopes: vec!["moderation:write".into()],
     };
     let transition = transition_trust(
         &repo,
@@ -174,7 +174,7 @@ async fn trust_transition_updates_all_versions_in_memory() {
     let ctx = AuthContext {
         publisher,
         token_id: Uuid::new_v4(),
-        scopes: vec![],
+        scopes: vec!["moderation:write".into()],
     };
     transition_trust(
         &repo,
@@ -266,7 +266,7 @@ async fn server_assigned_trust_requires_verified_publisher() {
     let context = AuthContext {
         publisher: moderator.clone(),
         token_id: Uuid::new_v4(),
-        scopes: vec![],
+        scopes: vec!["moderation:write".into()],
     };
     let rejected = transition_trust(
         &repo,

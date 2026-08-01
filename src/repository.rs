@@ -27,6 +27,15 @@ pub enum PackageRepository {
     Postgres(postgres::PostgresRepository),
 }
 
+pub(crate) fn token_id_from_opaque(token: &str) -> Option<Uuid> {
+    let value = token.strip_prefix("kop_")?;
+    let (id, secret) = value.split_once('_')?;
+    if secret.len() != 32 || !secret.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Uuid::parse_str(id).ok()
+}
+
 macro_rules! dispatch {
     ($self:expr, $method:ident, $($arg:expr),*) => {
         match $self {
