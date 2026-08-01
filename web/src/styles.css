@@ -416,6 +416,14 @@ a {
   background: var(--surface-strong);
 }
 
+.artifact-unavailable {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.75rem;
+  color: var(--text-faint);
+  font-size: 0.9rem;
+}
+
 .empty-state {
   padding: 2rem;
   text-align: center;

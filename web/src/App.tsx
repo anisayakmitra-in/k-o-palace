@@ -2,14 +2,18 @@ import { useEffect, useMemo, useState } from "react";
 import { createPalaceClient, PalaceApiError } from "./api/palaceClient";
 import { demoPackages } from "./data/demoPackages";
 import {
+  boundMetadata,
   formatDownloads,
   formatLabel,
   formatSuccessRate,
   getCompatibilityOptions,
   getLicenseOptions,
-  hasSignature,
+  getSignatureDescription,
+  getSignatureLabel,
+  getSignatureStatus,
   matchesMode,
   relativeFreshness,
+  truncateText,
   trustLevels,
   type DiscoveryMode,
   type SignatureFilter,
@@ -36,6 +40,44 @@ const copyByMode: Record<DiscoveryMode, { eyebrow: string; body: string }> = {
     body: "Adapter and discovery cards for external runtimes. This view never launches, shells into, or executes agents.",
   },
 };
+
+const displayText = (value: unknown, fallback: string): string =>
+  truncateText(value) || fallback;
+
+const displayMetadata = (values: unknown, fallback: string): string => {
+  const bounded = boundMetadata(values);
+  if (bounded.items.length === 0) {
+    return fallback;
+  }
+
+  const suffix = bounded.remaining > 0 ? `, +${bounded.remaining} more` : "";
+  return `${bounded.items.join(", ")}${suffix}`;
+};
+
+function MetadataChips({
+  values,
+  prefix,
+  marker = "",
+}: {
+  values: unknown;
+  prefix: string;
+  marker?: string;
+}) {
+  const bounded = boundMetadata(values);
+
+  return (
+    <>
+      {bounded.items.map((value, index) => (
+        <span key={`${prefix}-${index}`} className="chip subtle">
+          {marker}{value}
+        </span>
+      ))}
+      {bounded.remaining > 0 ? (
+        <span className="chip subtle metadata-more">+{bounded.remaining} more</span>
+      ) : null}
+    </>
+  );
+}
 
 function App() {
   const [theme, setTheme] = useState<Theme>(readStoredTheme);
@@ -121,17 +163,7 @@ function App() {
     return packages
       .filter((pkg) => matchesMode(pkg, mode))
       .filter((pkg) => selectedTrusts.includes(pkg.trust.level))
-      .filter((pkg) => {
-        if (signatureFilter === "signed") {
-          return hasSignature(pkg);
-        }
-
-        if (signatureFilter === "unsigned") {
-          return !hasSignature(pkg);
-        }
-
-        return true;
-      })
+      .filter((pkg) => signatureFilter === "all" || getSignatureStatus(pkg) === signatureFilter)
       .filter((pkg) => (selectedLicense === "all" ? true : pkg.license === selectedLicense))
       .filter((pkg) =>
         selectedRuntime === "all"
@@ -140,7 +172,7 @@ function App() {
       );
   }, [mode, packages, selectedLicense, selectedRuntime, selectedTrusts, signatureFilter]);
 
-  const signedCount = filteredPackages.filter(hasSignature).length;
+  const verifiedCount = filteredPackages.filter((pkg) => getSignatureStatus(pkg) === "verified").length;
   const averageSuccessRate = filteredPackages.length
     ? filteredPackages.reduce((sum, pkg) => sum + pkg.success_rate, 0) / filteredPackages.length
     : 0;
@@ -239,8 +271,8 @@ function App() {
               <strong>{filteredPackages.length}</strong>
             </div>
             <div className="stat">
-              <span>Signed</span>
-              <strong>{signedCount}</strong>
+              <span>Registry verified</span>
+              <strong>{verifiedCount}</strong>
             </div>
             <div className="stat">
               <span>Success rate</span>
@@ -283,8 +315,10 @@ function App() {
                 onChange={(event) => setSignatureFilter(event.target.value as SignatureFilter)}
               >
                 <option value="all">All packages</option>
-                <option value="signed">Signed only</option>
-                <option value="unsigned">Unsigned only</option>
+                <option value="verified">Registry verified only</option>
+                <option value="metadata_only">Signature metadata only</option>
+                <option value="not_verified">Not verified</option>
+                <option value="unreported">Verification not reported</option>
               </select>
             </label>
 
@@ -343,43 +377,41 @@ function App() {
                   <div className="card-top">
                     <div>
                       <div className="title-row">
-                        <h3>{pkg.name}</h3>
-                        <span className="version-tag">{pkg.version}</span>
+                        <h3>{displayText(pkg.name, "Unnamed package")}</h3>
+                        <span className="version-tag">{displayText(pkg.version, "Version unavailable")}</span>
                       </div>
-                      <p className="package-id">{pkg.id}</p>
+                      <p className="package-id">{displayText(pkg.id, "Package ID unavailable")}</p>
                     </div>
                     <span className={`trust-badge trust-${pkg.trust.level}`}>{formatLabel(pkg.trust.level)}</span>
                   </div>
 
-                  <p className="package-description">{pkg.description}</p>
+                                    <p className="package-description">
+                    {displayText(pkg.description, "No description provided.")}
+                  </p>
 
                   <div className="meta-row">
                     <span>{formatLabel(pkg.kind)}</span>
-                    <span>{pkg.license}</span>
+                    <span>{displayText(pkg.license, "License not listed")}</span>
                     <span>{formatDownloads(pkg.downloads)} downloads</span>
                     <span>{formatSuccessRate(pkg.success_rate)} success</span>
                   </div>
 
                   <div className="chip-row compact">
-                    {pkg.compatibility.runtimes.map((runtime) => (
-                      <span key={runtime} className="chip subtle">
-                        {runtime}
-                      </span>
-                    ))}
+                    <MetadataChips values={pkg.compatibility.runtimes} prefix={`${pkg.id}-runtime`} />
                   </div>
 
                   <div className="signal-grid">
                     <div>
                       <span className="signal-label">Signature</span>
-                      <strong>{hasSignature(pkg) ? "Present" : "Not published"}</strong>
+                      <strong>{getSignatureLabel(pkg)}</strong>
                     </div>
                     <div>
                       <span className="signal-label">Publisher</span>
-                      <strong>{pkg.trust.publisher}</strong>
+                      <strong>{displayText(pkg.trust.publisher, "Publisher unavailable")}</strong>
                     </div>
                     <div>
                       <span className="signal-label">Platforms</span>
-                      <strong>{pkg.compatibility.platforms.join(", ") || "Not listed"}</strong>
+                      <strong>{displayMetadata(pkg.compatibility.platforms, "Not listed")}</strong>
                     </div>
                     <div>
                       <span className="signal-label">Freshness</span>
@@ -388,21 +420,17 @@ function App() {
                   </div>
 
                   <div className="chip-row compact">
-                    {pkg.tags.map((tag) => (
-                      <span key={tag} className="chip subtle">
-                        #{tag}
-                      </span>
-                    ))}
+                    <MetadataChips values={pkg.tags} prefix={`${pkg.id}-tag`} marker="#" />
                   </div>
 
                   <div className="capability-block">
                     <div>
                       <span className="signal-label">Provides</span>
-                      <p>{pkg.capabilities.provides.join(", ") || "None listed"}</p>
+                      <p>{displayMetadata(pkg.capabilities.provides, "None listed")}</p>
                     </div>
                     <div>
                       <span className="signal-label">Requires</span>
-                      <p>{pkg.capabilities.requires.join(", ") || "None listed"}</p>
+                      <p>{displayMetadata(pkg.capabilities.requires, "None listed")}</p>
                     </div>
                   </div>
 
@@ -415,20 +443,26 @@ function App() {
                       Inspect details
                     </button>
                     {pkg.repository ? (
-                      <a href={pkg.repository} target="_blank" rel="noreferrer">
+                      <a href={pkg.repository} target="_blank" rel="noopener noreferrer">
                         Repository
                       </a>
                     ) : null}
                     {pkg.homepage ? (
-                      <a href={pkg.homepage} target="_blank" rel="noreferrer">
+                      <a href={pkg.homepage} target="_blank" rel="noopener noreferrer">
                         Homepage
                       </a>
                     ) : null}
                     {pkg.artifact_url ? (
-                      <a href={pkg.artifact_url} target="_blank" rel="noreferrer">
-                        Artifact
+                      <a
+                        href={palaceClient.getPackageDownloadUrl(pkg.id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                      >
+                        Download via K-O Palace
                       </a>
-                    ) : null}
+                    ) : (
+                      <span className="artifact-unavailable">Artifact download unavailable</span>
+                    )}
                   </div>
                 </article>
               ))}
@@ -455,9 +489,10 @@ function App() {
             <div className="dialog-header">
               <div>
                 <span className="eyebrow">Package inspection</span>
-                <h2 id="package-dialog-title">{selectedPackage.name}</h2>
+                <h2 id="package-dialog-title">{displayText(selectedPackage.name, "Unnamed package")}</h2>
                 <p className="package-id">
-                  {selectedPackage.id}@{selectedPackage.version}
+                  {displayText(selectedPackage.id, "Package ID unavailable")}@
+                  {displayText(selectedPackage.version, "Version unavailable")}
                 </p>
               </div>
               <button
@@ -470,25 +505,23 @@ function App() {
               </button>
             </div>
 
-            <p className="dialog-description">{selectedPackage.description}</p>
+            <p className="dialog-description">
+              {displayText(selectedPackage.description, "No description provided.")}
+            </p>
 
             <div className="dialog-grid">
               <div className="dialog-panel">
                 <span className="signal-label">Trust</span>
                 <strong>{formatLabel(selectedPackage.trust.level)}</strong>
-                <p>
-                  {hasSignature(selectedPackage)
-                    ? "A signature is published for this version."
-                    : "No signature is published for this version."}
-                </p>
+                <p>{getSignatureDescription(selectedPackage)}</p>
               </div>
               <div className="dialog-panel">
                 <span className="signal-label">Compatibility</span>
                 <strong>
-                  {selectedPackage.compatibility.platforms.join(", ") || "Not listed"}
+                  {displayMetadata(selectedPackage.compatibility.platforms, "Not listed")}
                 </strong>
                 <p>
-                  {selectedPackage.compatibility.runtimes.join(", ") || "No runtime listed"}
+                  {displayMetadata(selectedPackage.compatibility.runtimes, "No runtime listed")}
                 </p>
               </div>
               <div className="dialog-panel">
@@ -497,40 +530,48 @@ function App() {
                   {selectedPackage.capabilities.provides.length} provided
                 </strong>
                 <p>
-                  Requires: {selectedPackage.capabilities.requires.join(", ") || "none"}
+                  Requires: {displayMetadata(selectedPackage.capabilities.requires, "none")}
                 </p>
               </div>
               <div className="dialog-panel">
                 <span className="signal-label">Publisher</span>
-                <strong>{selectedPackage.trust.publisher}</strong>
+                <strong>{displayText(selectedPackage.trust.publisher, "Publisher unavailable")}</strong>
                 <p>
-                  {selectedPackage.license} license - {formatDownloads(selectedPackage.downloads)} downloads
+                  {displayText(selectedPackage.license, "License not listed")} license - {formatDownloads(
+                    selectedPackage.downloads,
+                  )} downloads
                 </p>
               </div>
             </div>
 
             <div className="dialog-notice">
               Inspection only. K-O Palace does not install or execute a package from this client.
-              Verify the publisher, signature, license, compatibility, and artifact source before
-              using another client to install it.
+              Verify the publisher, Palace-reported verification state, license, compatibility, and
+              artifact source before using another client to install it.
             </div>
 
             <div className="card-actions">
               {selectedPackage.repository ? (
-                <a href={selectedPackage.repository} target="_blank" rel="noreferrer">
+                <a href={selectedPackage.repository} target="_blank" rel="noopener noreferrer">
                   Repository
                 </a>
               ) : null}
               {selectedPackage.homepage ? (
-                <a href={selectedPackage.homepage} target="_blank" rel="noreferrer">
+                <a href={selectedPackage.homepage} target="_blank" rel="noopener noreferrer">
                   Homepage
                 </a>
               ) : null}
               {selectedPackage.artifact_url ? (
-                <a href={selectedPackage.artifact_url} target="_blank" rel="noreferrer">
-                  Artifact source
+                <a
+                  href={palaceClient.getPackageDownloadUrl(selectedPackage.id)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Download via K-O Palace
                 </a>
-              ) : null}
+              ) : (
+                <span className="artifact-unavailable">Artifact download unavailable</span>
+              )}
             </div>
           </section>
         </div>

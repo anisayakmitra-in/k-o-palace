@@ -22,6 +22,11 @@ export class PalaceApiError extends Error {
 const normalizeBaseUrl = (baseUrl?: string): string =>
   baseUrl ? baseUrl.replace(/\/+$/, "") : "";
 
+const createPackageDownloadUrl = (baseUrl: string, packageId: string): string => {
+  const encodedPackageId = encodeURIComponent(packageId);
+  return `${baseUrl}/api/v1/packages/${encodedPackageId}/download`;
+};
+
 const createSearchUrl = (baseUrl: string, query: SearchPackagesInput): string => {
   const params = new URLSearchParams({
     q: query.q,
@@ -40,6 +45,10 @@ export const createPalaceClient = (baseUrl = import.meta.env.VITE_PALACE_API_URL
   const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
 
   return {
+    getPackageDownloadUrl(packageId: string): string {
+      return createPackageDownloadUrl(normalizedBaseUrl, packageId);
+    },
+
     async searchPackages(input: SearchPackagesInput): Promise<PackageListResponse> {
       const response = await fetch(createSearchUrl(normalizedBaseUrl, input), {
         headers: {

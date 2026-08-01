@@ -31,6 +31,7 @@ export interface TrustInfo {
   level: TrustLevel;
   signature: string | null;
   public_key: string | null;
+  signature_verified?: boolean | null;
   content_hash: string | null;
   publisher: string;
 }
