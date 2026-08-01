@@ -238,7 +238,7 @@ impl PostgresRepository {
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         sqlx::query(
             "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
         )
         .bind(token.id)
         .bind(token.publisher_id)
