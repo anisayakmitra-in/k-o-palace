@@ -272,6 +272,13 @@ async fn publish_package(
         ));
     }
 
+    if pkg.artifact_url.is_some() && pkg.trust.content_hash.is_none() {
+        return Err(PalaceError::new(
+            PalaceErrorCode::HashMismatch,
+            "artifact-bearing packages require a content_hash",
+        ));
+    }
+
     let package = state.repo.publish_package(&pkg).await?;
     Ok((StatusCode::CREATED, Json(package)))
 }

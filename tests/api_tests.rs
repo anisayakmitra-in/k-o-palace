@@ -38,9 +38,7 @@ fn valid_pkg(id: impl Into<String>) -> Package {
         success_rate: 0.0,
         compatibility: CompatibilityInfo::default(),
         repository: Some("https://github.com/test/test".into()),
-        artifact_url: Some(
-            "https://github.com/test/test/releases/download/v1.0.0/pkg.tar.gz".into(),
-        ),
+        artifact_url: None,
         homepage: None,
         tags: vec!["test".into()],
         yanked: false,
@@ -242,4 +240,40 @@ async fn published_package_versions_cannot_be_updated() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn artifact_publish_without_digest_is_rejected_before_persistence() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let mut package = valid_pkg("unverified-artifact");
+    package.trust.publisher = publisher.name;
+    package.artifact_url =
+        Some("https://github.com/test/test/releases/download/v1.0.0/pkg.tar.gz".into());
+
+    let app = router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/v1/packages/unverified-artifact")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
