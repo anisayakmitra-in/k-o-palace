@@ -621,6 +621,7 @@ async fn create_token_handler(
         &req.name,
         req.expires_at,
         scopes,
+        state.config.security.token_hash_cost,
         &audit,
     )
     .await?;

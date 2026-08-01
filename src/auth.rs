@@ -137,6 +137,7 @@ fn prepare_api_token(
     name: impl Into<String>,
     expires_at: Option<chrono::DateTime<Utc>>,
     scopes: Vec<String>,
+    hash_cost: u32,
 ) -> PalaceResult<(String, ApiToken)> {
     let name = name.into();
     if name.trim().is_empty() || name.len() > 256 {
@@ -158,7 +159,7 @@ fn prepare_api_token(
         id,
         publisher_id,
         name,
-        token_hash: hash_token_plaintext(&plaintext),
+        token_hash: hash_token_plaintext_with_cost(&plaintext, hash_cost),
         created_at: Utc::now(),
         revoked_at: None,
         expires_at,
@@ -175,7 +176,8 @@ pub async fn create_api_token_with_options(
     expires_at: Option<chrono::DateTime<Utc>>,
     scopes: Vec<String>,
 ) -> PalaceResult<(String, ApiToken)> {
-    let (plaintext, token) = prepare_api_token(publisher_id, name, expires_at, scopes)?;
+    let (plaintext, token) =
+        prepare_api_token(publisher_id, name, expires_at, scopes, DEFAULT_COST)?;
     repo.create_api_token(&token).await?;
     Ok((plaintext, token))
 }
@@ -187,9 +189,10 @@ pub async fn create_api_token_with_options_and_audit(
     name: impl Into<String>,
     expires_at: Option<chrono::DateTime<Utc>>,
     scopes: Vec<String>,
+    hash_cost: u32,
     audit: &crate::models::AuditEvent,
 ) -> PalaceResult<(String, ApiToken)> {
-    let (plaintext, token) = prepare_api_token(publisher_id, name, expires_at, scopes)?;
+    let (plaintext, token) = prepare_api_token(publisher_id, name, expires_at, scopes, hash_cost)?;
     repo.create_api_token_with_audit(&token, audit).await?;
     Ok((plaintext, token))
 }
@@ -215,9 +218,12 @@ pub async fn create_api_token(
 
 /// Hash a plaintext token for storage using bcrypt.
 pub fn hash_token_plaintext(token: &str) -> String {
-    hash(token.as_bytes(), DEFAULT_COST).expect("bcrypt hash should not fail")
+    hash_token_plaintext_with_cost(token, DEFAULT_COST)
 }
 
+pub fn hash_token_plaintext_with_cost(token: &str, cost: u32) -> String {
+    hash(token.as_bytes(), cost.clamp(4, 31)).expect("bcrypt hash should not fail")
+}
 /// Constant-time-ish verification of a token against a stored hash.
 pub fn constant_time_verify(token: &str, hash: &str) -> bool {
     verify(token.as_bytes(), hash).unwrap_or(false)
