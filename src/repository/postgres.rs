@@ -241,6 +241,88 @@ impl PostgresRepository {
         })
     }
 
+    pub async fn get_publisher_verification(
+        &self,
+        publisher_id: Uuid,
+    ) -> PalaceResult<PublisherVerification> {
+        let row = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                bool,
+                Option<chrono::DateTime<Utc>>,
+                Option<Uuid>,
+                Option<String>,
+            ),
+        >(
+            "SELECT publisher_id, verified, verified_at, verified_by, reason
+             FROM publisher_verifications
+             WHERE publisher_id = $1",
+        )
+        .bind(publisher_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| PalaceError::new(PalaceErrorCode::ServerError, error.to_string()))?;
+
+        Ok(row
+            .map(|row| PublisherVerification {
+                publisher_id: row.0,
+                verified: row.1,
+                verified_at: row.2,
+                verified_by: row.3,
+                reason: row.4,
+            })
+            .unwrap_or(PublisherVerification {
+                publisher_id,
+                verified: false,
+                verified_at: None,
+                verified_by: None,
+                reason: None,
+            }))
+    }
+
+    pub async fn set_publisher_verification(
+        &self,
+        verification: &PublisherVerification,
+    ) -> PalaceResult<PublisherVerification> {
+        let row = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                bool,
+                Option<chrono::DateTime<Utc>>,
+                Option<Uuid>,
+                Option<String>,
+            ),
+        >(
+            "INSERT INTO publisher_verifications
+                (publisher_id, verified, verified_at, verified_by, reason, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NOW())
+             ON CONFLICT (publisher_id) DO UPDATE SET
+                verified = EXCLUDED.verified,
+                verified_at = EXCLUDED.verified_at,
+                verified_by = EXCLUDED.verified_by,
+                reason = EXCLUDED.reason,
+                updated_at = NOW()
+             RETURNING publisher_id, verified, verified_at, verified_by, reason",
+        )
+        .bind(verification.publisher_id)
+        .bind(verification.verified)
+        .bind(verification.verified_at)
+        .bind(verification.verified_by)
+        .bind(&verification.reason)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| PalaceError::new(PalaceErrorCode::ServerError, error.to_string()))?;
+
+        Ok(PublisherVerification {
+            publisher_id: row.0,
+            verified: row.1,
+            verified_at: row.2,
+            verified_by: row.3,
+            reason: row.4,
+        })
+    }
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         sqlx::query(
             "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
@@ -828,8 +910,8 @@ impl PostgresRepository {
     }
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
-        let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, chrono::DateTime<Utc>)>(
-            "SELECT id, package_id, publisher_id, rating, comment, created_at FROM reviews WHERE package_id = $1 ORDER BY created_at DESC"
+        let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)>(
+            "SELECT id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at FROM reviews WHERE package_id = $1 AND status = 'published' ORDER BY created_at DESC"
         )
         .bind(package_id)
         .fetch_all(&self.pool)
@@ -844,9 +926,47 @@ impl PostgresRepository {
                 reviewer_id: r.2,
                 rating: r.3 as i16,
                 comment: r.4,
-                created_at: r.5,
+                status: ReviewStatus::parse(&r.5).unwrap_or_default(),
+                moderated_by: r.6,
+                moderation_reason: r.7,
+                moderated_at: r.8,
+                created_at: r.9,
             })
             .collect())
+    }
+
+    pub async fn moderate_review(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+    ) -> PalaceResult<Review> {
+        let row = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)>(
+            "UPDATE reviews SET status = $1, moderated_by = $2, moderation_reason = $3, moderated_at = NOW() WHERE id = $4 AND package_id = $5 RETURNING id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at"
+        )
+        .bind(status.as_str())
+        .bind(moderator_id)
+        .bind(reason)
+        .bind(review_id)
+        .bind(package_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
+        Ok(Review {
+            id: row.0,
+            package_id: row.1,
+            reviewer_id: row.2,
+            rating: row.3 as i16,
+            comment: row.4,
+            status: ReviewStatus::parse(&row.5).unwrap_or_default(),
+            moderated_by: row.6,
+            moderation_reason: row.7,
+            moderated_at: row.8,
+            created_at: row.9,
+        })
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {

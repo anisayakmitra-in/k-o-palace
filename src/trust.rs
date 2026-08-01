@@ -123,6 +123,17 @@ pub async fn transition_trust(
     let package = repo.get_package(package_id).await?;
     let current = package.trust.level;
 
+    if new_level.is_server_assigned() {
+        if let Some(publisher_id) = repo.get_package_publisher_id(package_id).await? {
+            let verification = repo.get_publisher_verification(publisher_id).await?;
+            if !verification.verified {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::TrustTransitionDenied,
+                    "publisher verification is required for server-assigned trust levels",
+                ));
+            }
+        }
+    }
     if !can_transition(current.clone(), new_level.clone()) {
         return Err(PalaceError::new(
             PalaceErrorCode::TrustTransitionDenied,

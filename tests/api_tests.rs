@@ -5,12 +5,16 @@ use axum::http::{Request, StatusCode};
 use chrono::Utc;
 use k_o_palace::{
     app::AppState,
-    auth::register_publisher,
+    auth::{create_api_token_with_options, register_publisher},
     config::PalaceConfig,
-    models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind, TrustInfo, TrustLevel},
+    models::{
+        CapabilityInfo, CompatibilityInfo, Package, PackageKind, Review, ReviewStatus, Role,
+        TrustInfo, TrustLevel,
+    },
     routes::router,
 };
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn test_state() -> AppState {
     let config = PalaceConfig::default();
@@ -47,6 +51,45 @@ fn valid_pkg(id: impl Into<String>) -> Package {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
+}
+
+fn review(package_id: impl Into<String>, reviewer_id: Uuid, rating: i16, comment: &str) -> Review {
+    Review {
+        id: Uuid::new_v4(),
+        package_id: package_id.into(),
+        reviewer_id,
+        rating,
+        comment: Some(comment.into()),
+        status: ReviewStatus::Published,
+        moderated_by: None,
+        moderation_reason: None,
+        moderated_at: None,
+        created_at: Utc::now(),
+    }
+}
+
+async fn register_moderator(
+    state: &AppState,
+    name: &str,
+) -> (k_o_palace::models::Publisher, String) {
+    let (publisher, _token) = register_publisher(&state.repo, name, name, None, None)
+        .await
+        .unwrap();
+    let publisher = state
+        .repo
+        .update_publisher_role(publisher.id, Role::Moderator)
+        .await
+        .unwrap();
+    let (token, _) = create_api_token_with_options(
+        &state.repo,
+        publisher.id,
+        format!("{name}-moderation"),
+        None,
+        vec!["moderation:write".into()],
+    )
+    .await
+    .unwrap();
+    (publisher, token)
 }
 
 #[tokio::test]
@@ -330,4 +373,250 @@ async fn missing_download_version_is_rejected() {
         .await
         .unwrap_err();
     assert_eq!(error.code, k_o_palace::error::PalaceErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn publisher_cannot_moderate_review() {
+    let state = test_state();
+    let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (reviewer, _reviewer_token) =
+        register_publisher(&state.repo, "reviewer", "Reviewer", None, None)
+            .await
+            .unwrap();
+    let mut package = valid_pkg("moderation-package");
+    package.trust.publisher = owner.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let seeded_review = review(&package.id, reviewer.id, 4, "looks good");
+    state.repo.add_review(&seeded_review).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::patch(format!(
+                "/api/v1/packages/{}/reviews/{}",
+                package.id, seeded_review.id
+            ))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {owner_token}"))
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "hidden",
+                    "reason": "abusive"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn moderator_can_hide_review() {
+    let state = test_state();
+    let (owner, _owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (reviewer, _reviewer_token) =
+        register_publisher(&state.repo, "reviewer", "Reviewer", None, None)
+            .await
+            .unwrap();
+    let (moderator, moderator_token) = register_moderator(&state, "moderator").await;
+
+    let mut package = valid_pkg("moderation-target");
+    package.trust.publisher = owner.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let seeded_review = review(&package.id, reviewer.id, 2, "needs work");
+    state.repo.add_review(&seeded_review).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::patch(format!(
+                "/api/v1/packages/{}/reviews/{}",
+                package.id, seeded_review.id
+            ))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {moderator_token}"))
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "hidden",
+                    "reason": "personal attack"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let review: Review = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(review.status, ReviewStatus::Hidden);
+    assert_eq!(review.moderated_by, Some(moderator.id));
+    assert_eq!(review.moderation_reason.as_deref(), Some("personal attack"));
+    assert!(review.moderated_at.is_some());
+}
+
+#[tokio::test]
+async fn list_reviews_excludes_hidden_reviews() {
+    let state = test_state();
+    let (owner, _owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (reviewer_one, _token_one) =
+        register_publisher(&state.repo, "reviewer-one", "Reviewer One", None, None)
+            .await
+            .unwrap();
+    let (reviewer_two, _token_two) =
+        register_publisher(&state.repo, "reviewer-two", "Reviewer Two", None, None)
+            .await
+            .unwrap();
+    let (moderator, _moderator_token) = register_moderator(&state, "moderator").await;
+
+    let mut package = valid_pkg("public-review-list");
+    package.trust.publisher = owner.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let visible_review = review(&package.id, reviewer_one.id, 5, "visible");
+    let hidden_review = review(&package.id, reviewer_two.id, 1, "hidden");
+    state.repo.add_review(&visible_review).await.unwrap();
+    state.repo.add_review(&hidden_review).await.unwrap();
+    state
+        .repo
+        .moderate_review(
+            &package.id,
+            hidden_review.id,
+            ReviewStatus::Hidden,
+            moderator.id,
+            Some("spam".into()),
+        )
+        .await
+        .unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get(format!("/api/v1/packages/{}/reviews", package.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reviews: Vec<Review> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].id, visible_review.id);
+}
+
+#[tokio::test]
+async fn publisher_verification_requires_moderator_and_is_persisted() {
+    let state = test_state();
+    let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (_moderator, moderator_token) = register_moderator(&state, "moderator").await;
+    let app = router(state.clone());
+
+    let body = serde_json::json!({
+        "verified": true,
+        "reason": "identity review completed"
+    });
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::patch("/api/v1/publishers/owner/verification")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {owner_token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let accepted = app
+        .oneshot(
+            Request::patch("/api/v1/publishers/owner/verification")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {moderator_token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let response: k_o_palace::models::PublisherVerification = serde_json::from_slice(
+        &axum::body::to_bytes(accepted.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response.publisher_id, owner.id);
+    assert!(response.verified);
+    assert_eq!(
+        response.reason.as_deref(),
+        Some("identity review completed")
+    );
+
+    let stored = state
+        .repo
+        .get_publisher_verification(owner.id)
+        .await
+        .unwrap();
+    assert!(stored.verified);
+    assert!(stored.verified_at.is_some());
+    assert!(stored.verified_by.is_some());
+}
+
+#[tokio::test]
+async fn dependency_resolution_endpoint_returns_capability_graph() {
+    let state = test_state();
+    let mut root = valid_pkg("root.package");
+    root.capabilities.requires = vec!["cap.database".into()];
+
+    let mut dependency = valid_pkg("database.package");
+    dependency.capabilities.provides = vec!["cap.database".into()];
+    dependency.compatibility = CompatibilityInfo {
+        runtimes: vec!["pandora".into()],
+        platforms: vec!["windows".into()],
+    };
+
+    state.repo.publish_package(&root).await.unwrap();
+    state.repo.publish_package(&dependency).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/root.package/resolve?runtime=pandora&platform=windows")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: k_o_palace::resolve::ResolutionResponse = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(body.complete);
+    assert_eq!(body.resolved_dependencies.len(), 1);
+    assert_eq!(
+        body.resolved_dependencies[0].selected_package_id.as_deref(),
+        Some("database.package")
+    );
 }

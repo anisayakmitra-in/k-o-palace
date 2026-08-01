@@ -3,14 +3,14 @@
 use k_o_palace::{
     error::PalaceErrorCode,
     models::{
-        CapabilityInfo, CompatibilityInfo, KuberManifest, ManifestPackage, ManifestTrust, Package,
-        PackageKind, TrustInfo,
+        CapabilityInfo, CompatibilityInfo, ManifestPackage, ManifestTrust, Package, PackageKind,
+        PalaceManifest, TrustInfo,
     },
     validation::{is_valid_https_url, validate_manifest, validate_package},
 };
 
-fn valid_manifest() -> KuberManifest {
-    KuberManifest {
+fn valid_manifest() -> PalaceManifest {
+    PalaceManifest {
         package: ManifestPackage {
             id: "test.gene".into(),
             name: "Test Gene".into(),

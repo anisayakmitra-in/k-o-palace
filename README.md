@@ -2,17 +2,17 @@
 
 > Open AI Runtime Registry — the sovereign ecosystem for discovering, validating, signing, versioning, evolving, and distributing AI runtime components.
 
-K-O Palace is a runtime-agnostic AI package registry that implements the KUBER manifest specification. It provides secure package publishing, trust-level verification, Ed25519 signature validation, content-hash verification, and artifact storage with allowlist enforcement.
+K-O Palace is a runtime-agnostic AI package registry that implements the K-O Palace manifest specification. It provides secure package publishing, trust-level verification, Ed25519 signature validation, content-hash verification, and artifact storage with allowlist enforcement.
 
 ## Current Functionality
 
-- **Registry API** with 17 endpoints under `/api/v1`
-- **Manifest validation** for `kuber.toml` (package ID, semver, kind, author, license, compatibility, capabilities, URLs, trust metadata)
+- **Versioned registry API** under /api/v1 for packages, publishers, reviews, trust, search, and dependency resolution
+- **Manifest validation** for `palace.toml` (package ID, semver, kind, author, license, compatibility, capabilities, URLs, trust metadata)
 - **Authentication** with hashed API tokens, publisher ownership, and role-based access (publisher, maintainer, moderator, administrator)
-- **Trust levels** with explicit server-enforced transitions (Experimental → Community → Verified → Official → Enterprise → Certified)
+- **Trust levels** with explicit server-enforced transitions, backed by publisher verification for identified publishers
 - **Ed25519 signature verification** and SHA-256 content-hash verification
 - **Artifact delivery** from local filesystem and GitHub Release sources, with HTTPS enforcement, host allowlists, bounded streaming to temporary files, redirect limits, and checksum verification
-- **Pagination** with bounded limits and accurate total counts
+- **Capability dependency resolution** with runtime/platform filtering, yanked-package exclusion, deterministic candidate ranking, and bounded graph traversal
 - **Search** with ranked relevance scoring
 - **Structured errors** with stable error codes
 - **CORS** configured from explicit origins (not permissive)
@@ -25,7 +25,7 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - PostgreSQL persistence with SQLx migrations (10 tables: publishers, api_tokens, packages, manifests, artifacts, signatures, reviews, trust_transitions, download_events, audit_events)
 - Token revocation and constant-time bcrypt comparison
 - Immutable audit events for all trust transitions and critical operations
-- Rate limiting for publish, search, download, and auth endpoints
+- Rate limiting for publish, search, download, review, and auth endpoints
 - HTTPS enforcement for artifact URLs in production
 - No client-self-assigned trust levels above Community
 - Secure defaults: localhost bind, configured CORS, body limits, timeouts
@@ -36,7 +36,7 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - S3 / Azure Blob / GCS storage adapters
 - GitLab and Codeberg release metadata backends
 - WebHOOK-based package update notifications
-- Semantic versioning constraint resolver for dependencies
+- Semantic version constraints and lockfiles for dependency resolution
 - Package signing key rotation workflow
 - Federated registry sync (mirror mode)
 - SBOM generation per package version
@@ -51,13 +51,23 @@ docker compose up --build
 ```
 
 Change the example database password before exposing the service. Public deployments should provide secrets through the platform secret manager, terminate TLS at a trusted proxy, set explicit CORS origins, and configure backups for the PostgreSQL volume.
+## Web Client
+
+The standalone React and Vite client provides discovery and trust review without executing packages.
+
+    cd web
+    npm install
+    npm run dev
+
+Set VITE_PALACE_API_URL to point the client at a running Palace API. The web client is a discovery surface for Pandora-compatible packages and external-agent adapters; installation and execution remain explicit client actions.
+
 ## Local Development
 
 ### Prerequisites
 
 - Rust 1.75+ (`rustup`)
 - PostgreSQL 14+ (for production mode)
-- Node.js 18+ (only if modifying the frontend, if any)
+- Node.js 20.19+ and npm (for the web client)
 
 ### Quick Start (PostgreSQL)
 
@@ -214,7 +224,7 @@ All endpoints are versioned under `/api/v1`. Breaking changes require a new API 
 
 - **Authentication**: Bearer token (bcrypt-hashed at rest)
 - **Authorization**: Role-based (publisher, maintainer, moderator, administrator)
-- **Trust levels**: Server-enforced transitions, no client self-assignment above Community
+- **Trust levels** with explicit server-enforced transitions, backed by publisher verification for identified publishers
 - **Signatures**: Ed25519 verified server-side
 - **Content hash**: SHA-256 verified against uploaded artifact
 - **Artifacts**: HTTPS-only, host allowlisted, redirect-limited, size-limited, content-type validated

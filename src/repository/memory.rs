@@ -13,6 +13,7 @@ use uuid::Uuid;
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryRepository {
     publishers: Arc<RwLock<HashMap<Uuid, Publisher>>>,
+    verifications: Arc<RwLock<HashMap<Uuid, PublisherVerification>>>,
     tokens: Arc<RwLock<HashMap<Uuid, ApiToken>>>,
     last_used: Arc<RwLock<HashMap<Uuid, chrono::DateTime<Utc>>>>,
     packages: Arc<RwLock<HashMap<String, Vec<Package>>>>,
@@ -108,6 +109,33 @@ impl InMemoryRepository {
         Ok(publisher.clone())
     }
 
+    pub async fn get_publisher_verification(
+        &self,
+        publisher_id: Uuid,
+    ) -> PalaceResult<PublisherVerification> {
+        self.get_publisher_by_id(publisher_id).await?;
+        let map = self.verifications.read().await;
+        Ok(map
+            .get(&publisher_id)
+            .cloned()
+            .unwrap_or(PublisherVerification {
+                publisher_id,
+                verified: false,
+                verified_at: None,
+                verified_by: None,
+                reason: None,
+            }))
+    }
+
+    pub async fn set_publisher_verification(
+        &self,
+        verification: &PublisherVerification,
+    ) -> PalaceResult<PublisherVerification> {
+        self.get_publisher_by_id(verification.publisher_id).await?;
+        let mut map = self.verifications.write().await;
+        map.insert(verification.publisher_id, verification.clone());
+        Ok(verification.clone())
+    }
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         let mut map = self.tokens.write().await;
         map.insert(token.id, token.clone());
@@ -409,7 +437,35 @@ impl InMemoryRepository {
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
         let map = self.reviews.read().await;
-        Ok(map.get(package_id).cloned().unwrap_or_default())
+        Ok(map
+            .get(package_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|review| review.status == ReviewStatus::Published)
+            .collect())
+    }
+
+    pub async fn moderate_review(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+    ) -> PalaceResult<Review> {
+        let mut map = self.reviews.write().await;
+        let review = map
+            .get_mut(package_id)
+            .into_iter()
+            .flat_map(|reviews| reviews.iter_mut())
+            .find(|review| review.id == review_id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
+        review.status = status;
+        review.moderated_by = Some(moderator_id);
+        review.moderation_reason = reason;
+        review.moderated_at = Some(chrono::Utc::now());
+        Ok(review.clone())
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {

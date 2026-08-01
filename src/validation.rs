@@ -3,7 +3,7 @@
 use crate::{
     error::{PalaceError, PalaceErrorCode, PalaceResult},
     models::{
-        CapabilityInfo, CompatibilityInfo, KuberManifest, ManifestTrust, Package, PackageKind,
+        CapabilityInfo, CompatibilityInfo, ManifestTrust, Package, PackageKind, PalaceManifest,
         TrustInfo, TrustLevel,
     },
 };
@@ -13,8 +13,8 @@ use semver::Version;
 use std::collections::HashSet;
 use url::Url;
 
-/// Validate a `kuber.toml` manifest against the documented specification.
-pub fn validate_manifest(manifest: &KuberManifest) -> PalaceResult<()> {
+/// Validate a `palace.toml` manifest against the documented specification.
+pub fn validate_manifest(manifest: &PalaceManifest) -> PalaceResult<()> {
     let mut errors = Vec::new();
 
     validate_package_id(&manifest.package.id, &mut errors);
@@ -164,7 +164,7 @@ fn validate_compatibility(comp: &CompatibilityInfo, errors: &mut Vec<(&'static s
     }
 }
 
-fn validate_urls(manifest: &KuberManifest, errors: &mut Vec<(&'static str, String)>) {
+fn validate_urls(manifest: &PalaceManifest, errors: &mut Vec<(&'static str, String)>) {
     if let Some(url) = &manifest.package.homepage {
         if !is_valid_https_url(url) {
             errors.push(("package.homepage", format!("invalid HTTPS URL: {url}")));
@@ -256,7 +256,7 @@ fn validate_metadata(
 }
 
 fn reject_unknown_security_fields(
-    manifest: &KuberManifest,
+    manifest: &PalaceManifest,
     errors: &mut Vec<(&'static str, String)>,
 ) {
     // Known top-level keys. Reject anything else at the top level as a security-critical guard.

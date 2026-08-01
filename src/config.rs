@@ -55,6 +55,7 @@ pub struct SecurityConfig {
     pub rate_limit_publish_per_minute: u32,
     pub rate_limit_search_per_minute: u32,
     pub rate_limit_download_per_minute: u32,
+    pub rate_limit_review_per_minute: u32,
     pub rate_limit_auth_per_minute: u32,
     pub token_hash_cost: u32,
     pub require_https_in_production: bool,
@@ -100,6 +101,7 @@ impl Default for PalaceConfig {
                 rate_limit_publish_per_minute: 10,
                 rate_limit_search_per_minute: 120,
                 rate_limit_download_per_minute: 240,
+                rate_limit_review_per_minute: 10,
                 rate_limit_auth_per_minute: 10,
                 token_hash_cost: bcrypt::DEFAULT_COST,
                 require_https_in_production: true,
@@ -210,6 +212,11 @@ impl PalaceConfig {
         if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE") {
             if let Ok(value) = value.parse() {
                 cfg.security.rate_limit_download_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_REVIEW_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_review_per_minute = value;
             }
         }
         if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_AUTH_PER_MINUTE") {

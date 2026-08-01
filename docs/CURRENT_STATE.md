@@ -12,9 +12,9 @@ K-O Palace is a Rust registry API. Its default build uses PostgreSQL; the explic
 - Publishing, updating, deleting, and reviewing require bearer authentication. The API checks publisher ownership before package mutation.
 - Package metadata validation covers required fields, SemVer, HTTPS URLs, basic package IDs, kinds, trust metadata, compatibility, and capabilities.
 - The in-memory backend supports package versions, publisher lookup, package search, discovery lists, reviews, token management, trust-transition records, and yanking helpers.
-- The publisher directory returns public publisher profiles in a deterministic name order.
+- The publisher directory returns public publisher profiles in a deterministic name order. Moderator and administrator decisions are stored in a durable publisher-verification record and audit log.
 - Artifact fetches enforce HTTPS, allowed hosts, safe resolved destinations, per-redirect validation, configured response limits, and optional SHA-256 verification. Ed25519 verification is available as a library helper. The runtime rejects unimplemented storage backends instead of aliasing them to GitHub.
-- The PostgreSQL adapter persists publisher ownership, package trust metadata, verified artifact metadata, and audit events. Its database-backed integration test runs when `KOP_TEST_DATABASE_URL` is provided, including in CI. The binary also drains active requests on Ctrl+C and Unix terminate signals.
+- The PostgreSQL adapter persists publisher ownership, publisher verification, package trust metadata, verified artifact metadata, and audit events.
 
 ## Runtime Boundary
 
@@ -36,17 +36,17 @@ The current migrations and adapter persist package ownership and trust state, an
 
 ### Access and social features
 
-- Public publisher registration is disabled by default and must be explicitly enabled with `PALACE_ALLOW_PUBLIC_REGISTRATION=true`. Enabled registration still issues a publishing token and needs identity verification, invitations, and stronger anti-abuse controls for a public service.
+- Public publisher registration is disabled by default and must be explicitly enabled with PALACE_ALLOW_PUBLIC_REGISTRATION=true. Publisher verification is moderator-gated and durable; enabled public registration still needs identity verification, invitations, and stronger anti-abuse controls.
 - Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes remain unrestricted for compatibility; new tokens should request least privilege.
 
 - Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; a distributed deployment still needs a shared limiter.
-- Reviews can be created, but there is no one-review policy, edit/delete flow, moderation route, or reputation calculation.
+- Reviews enforce one review per publisher and can be published or hidden by moderators. Edit/delete workflows and reputation calculation remain out of scope.
 - Discovery endpoints exist, but featured and trending use simple stored package fields. Download events and anti-manipulation rules are not implemented.
-- There is no web client, user feed, follow graph, post model, media system, notification system, or moderation workflow.
+- The standalone web/ client provides discovery, Pandora/Agent mode filtering, trust filters, and theme switching. User feeds, follows, media, notifications, and social publishing remain out of scope.
 
 ### Registry ecosystem
 
-- Dependency constraints, resolution, lockfiles, compatibility decisions, runtime adapters, source-forge provenance, and package transfer/tombstone policy are incomplete or absent from the running API.
+- Capability dependency resolution is available through GET /api/v1/packages/{id}/resolve with runtime/platform filters, yanked exclusion, deterministic ranking, cycle protection, and a bounded graph walk. Version constraints, lockfiles, compatibility decisions beyond the current filters, runtime adapters, source-forge provenance, and package transfer/tombstone policy remain incomplete.
 - The package identity validator accepts flat IDs and does not normalize published IDs through the namespace model in `src/identity.rs`.
 - `docs/API_CONTRACT.md` publishes the current route, authentication, error, and deployment contract. A machine-generated OpenAPI document is still a follow-up.
 
@@ -64,13 +64,13 @@ cargo test --locked --all-targets
 cargo test --locked --all-targets --features postgres
 ```
 
-The PostgreSQL integration test remains conditional on `KOP_TEST_DATABASE_URL`; CI supplies that database.
+The PostgreSQL integration test remains conditional on KOP_TEST_DATABASE_URL; CI supplies that database. Release artifacts currently include checksums and an SBOM; cryptographic signing still requires repository secrets and key-rotation procedures.
 
 ## Next Order
 
-1. Repair and test the PostgreSQL schema and adapter as one compatibility pass.
-2. Select PostgreSQL explicitly at startup and add database-backed integration tests to CI.
-3. Stream artifact verification without retaining the entire artifact in memory.
-4. Add scoped token lookup and per-client abuse controls.
-5. Add publisher verification, review controls, and deterministic discovery rules.
-6. Build the web client after the registry API has dependency resolution, install verification, and durable operational controls.
+1. Add concurrent PostgreSQL parity tests for publish, review, download, and trust transitions.
+2. Add invitations, identity verification, and stronger public-registration abuse controls.
+3. Add version constraints, lockfiles, and compatibility decisions beyond the current resolver.
+4. Add deterministic download accounting and anti-manipulation rules for discovery.
+5. Add runtime adapters, package transfer policy, and a machine-generated OpenAPI document.
+6. Configure release signing keys, rotation procedures, and hosted web deployment controls.

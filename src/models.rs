@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// A KUBER package — any publishable AI runtime component.
+/// A K-O Palace package — any publishable AI runtime component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Package {
     pub id: String,
@@ -243,20 +243,59 @@ pub struct VersionListResponse {
     pub versions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Review {
     pub id: Uuid,
     pub package_id: String,
     pub reviewer_id: Uuid,
     pub rating: i16,
     pub comment: Option<String>,
+    #[serde(default)]
+    pub status: ReviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderated_by: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderation_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    #[default]
+    Published,
+    Hidden,
+}
+
+impl ReviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "published" => Some(Self::Published),
+            "hidden" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewRequest {
     pub rating: i16,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewModerationRequest {
+    pub status: ReviewStatus,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,6 +307,24 @@ pub struct Publisher {
     pub website: Option<String>,
     pub role: Role,
     pub created_at: DateTime<Utc>,
+}
+
+/// Durable verification state for a publisher account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublisherVerification {
+    pub publisher_id: Uuid,
+    pub verified: bool,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_by: Option<Uuid>,
+    pub reason: Option<String>,
+}
+
+/// Request body for a moderator publisher-verification decision.
+#[derive(Debug, Deserialize)]
+pub struct PublisherVerificationRequest {
+    pub verified: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -363,11 +420,11 @@ pub struct Manifest {
     pub package_id: String,
     pub version: String,
     pub raw: String,
-    pub parsed: KuberManifest,
+    pub parsed: PalaceManifest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KuberManifest {
+pub struct PalaceManifest {
     pub package: ManifestPackage,
     #[serde(default)]
     pub capabilities: CapabilityInfo,

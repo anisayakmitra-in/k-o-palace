@@ -3,7 +3,7 @@
 use chrono::Utc;
 use k_o_palace::{
     auth::AuthContext,
-    models::{Publisher, Role, TrustInfo, TrustLevel},
+    models::{Publisher, PublisherVerification, Role, TrustInfo, TrustLevel},
     trust::{can_transition, transition_trust, verify_signature},
 };
 use uuid::Uuid;
@@ -202,4 +202,104 @@ async fn trust_transition_updates_all_versions_in_memory() {
             .level,
         TrustLevel::Verified
     );
+}
+
+#[tokio::test]
+async fn server_assigned_trust_requires_verified_publisher() {
+    use k_o_palace::models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind};
+
+    let repo = k_o_palace::repository::PackageRepository::Memory(
+        k_o_palace::repository::memory::InMemoryRepository::new(),
+    );
+    let owner = Publisher {
+        id: Uuid::new_v4(),
+        name: "owner".into(),
+        display_name: "Owner".into(),
+        email: None,
+        website: None,
+        role: Role::Publisher,
+        created_at: Utc::now(),
+    };
+    let moderator = Publisher {
+        id: Uuid::new_v4(),
+        name: "moderator".into(),
+        display_name: "Moderator".into(),
+        email: None,
+        website: None,
+        role: Role::Moderator,
+        created_at: Utc::now(),
+    };
+    repo.create_publisher(&owner).await.unwrap();
+    repo.create_publisher(&moderator).await.unwrap();
+
+    let package = Package {
+        id: "owned.gene".into(),
+        name: "Owned Gene".into(),
+        version: "1.0.0".into(),
+        kind: PackageKind::Gene,
+        description: "owned".into(),
+        author: owner.name.clone(),
+        license: "MIT".into(),
+        trust: TrustInfo {
+            level: TrustLevel::Experimental,
+            signature: None,
+            public_key: None,
+            content_hash: None,
+            publisher: owner.name.clone(),
+        },
+        capabilities: CapabilityInfo::default(),
+        downloads: 0,
+        success_rate: 0.0,
+        compatibility: CompatibilityInfo::default(),
+        repository: None,
+        artifact_url: None,
+        homepage: None,
+        tags: vec![],
+        yanked: false,
+        deprecated: None,
+        provenance: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    repo.publish_package(&package).await.unwrap();
+
+    let context = AuthContext {
+        publisher: moderator.clone(),
+        token_id: Uuid::new_v4(),
+        scopes: vec![],
+    };
+    let rejected = transition_trust(
+        &repo,
+        &context,
+        "owned.gene",
+        TrustLevel::Verified,
+        Some("not yet verified".into()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+
+    repo.set_publisher_verification(&PublisherVerification {
+        publisher_id: owner.id,
+        verified: true,
+        verified_at: Some(Utc::now()),
+        verified_by: Some(moderator.id),
+        reason: Some("reviewed".into()),
+    })
+    .await
+    .unwrap();
+
+    let transition = transition_trust(
+        &repo,
+        &context,
+        "owned.gene",
+        TrustLevel::Verified,
+        Some("approved".into()),
+    )
+    .await
+    .unwrap();
+    assert_eq!(transition.to_level, "verified");
 }

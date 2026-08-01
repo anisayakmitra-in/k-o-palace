@@ -54,6 +54,19 @@ impl PackageRepository {
         dispatch!(self, get_publisher_by_name, name)
     }
 
+    pub async fn get_publisher_verification(
+        &self,
+        publisher_id: Uuid,
+    ) -> PalaceResult<PublisherVerification> {
+        dispatch!(self, get_publisher_verification, publisher_id)
+    }
+
+    pub async fn set_publisher_verification(
+        &self,
+        verification: &PublisherVerification,
+    ) -> PalaceResult<PublisherVerification> {
+        dispatch!(self, set_publisher_verification, verification)
+    }
     pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
         dispatch!(self, list_publishers,)
     }
@@ -183,6 +196,25 @@ impl PackageRepository {
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
         dispatch!(self, list_reviews, package_id)
+    }
+
+    pub async fn moderate_review(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+    ) -> PalaceResult<Review> {
+        dispatch!(
+            self,
+            moderate_review,
+            package_id,
+            review_id,
+            status,
+            moderator_id,
+            reason
+        )
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {

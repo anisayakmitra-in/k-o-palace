@@ -5,7 +5,7 @@ use k_o_palace::{
     auth::create_api_token,
     models::{
         AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher, Review,
-        Role, TrustInfo, TrustLevel,
+        ReviewStatus, Role, TrustInfo, TrustLevel,
     },
     repository::{postgres::PostgresRepository, PackageRepository},
 };
@@ -120,10 +120,30 @@ async fn postgres_migrates_and_persists_core_registry_records() {
         reviewer_id: publisher.id,
         rating: 5,
         comment: Some("integration test".into()),
+        status: ReviewStatus::Published,
+        moderated_by: None,
+        moderation_reason: None,
+        moderated_at: None,
         created_at: Utc::now(),
     };
-    repository.add_review(&review).await.unwrap();
+    let review = repository.add_review(&review).await.unwrap();
     assert_eq!(repository.list_reviews(&package.id).await.unwrap().len(), 1);
+    let moderated = repository
+        .moderate_review(
+            &package.id,
+            review.id,
+            ReviewStatus::Hidden,
+            publisher.id,
+            Some("integration moderation".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(moderated.status, ReviewStatus::Hidden);
+    assert!(repository
+        .list_reviews(&package.id)
+        .await
+        .unwrap()
+        .is_empty());
 
     repository
         .record_audit_event(&AuditEvent {

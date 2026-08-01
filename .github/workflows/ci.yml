@@ -57,6 +57,21 @@ jobs:
       - name: cargo audit
         run: cargo install cargo-audit --locked && cargo audit
 
+  web:
+    name: Build Web Client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        run: npm ci --prefix web
+      - name: Build web client
+        run: npm run build --prefix web
+
   build:
     name: Build Release
     runs-on: ubuntu-latest

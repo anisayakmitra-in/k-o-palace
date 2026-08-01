@@ -8,14 +8,16 @@ use crate::{
     },
     error::{PalaceError, PalaceErrorCode, PalaceResult},
     models::{
-        ListParams, Package, PackageListResponse, PublisherRegisterRequest,
-        PublisherRegisterResponse, PublisherResponse, Review, ReviewRequest, SearchParams,
-        TokenCreateRequest, TokenCreateResponse, TokenResponse, TrustTransitionRequest,
-        VersionListResponse,
+        AuditEvent, ListParams, Package, PackageListResponse, PublisherRegisterRequest,
+        PublisherRegisterResponse, PublisherResponse, PublisherVerification,
+        PublisherVerificationRequest, Review, ReviewModerationRequest, ReviewRequest, ReviewStatus,
+        SearchParams, TokenCreateRequest, TokenCreateResponse, TokenResponse,
+        TrustTransitionRequest, VersionListResponse,
     },
     pagination::Pagination,
     repository::PackageFilters,
     request_id::request_id_middleware,
+    resolve::{resolve_dependencies, ResolutionResponse, ResolveOptions},
     search::rank_results,
     trust::transition_trust,
     validation::{normalize_trust_level, validate_package},
@@ -24,9 +26,10 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::Redirect,
-    routing::{delete, get, post},
+    routing::{delete, get, patch, post},
     Json, Router,
 };
+use chrono::Utc;
 use std::sync::Arc;
 use std::time::Duration;
 use tower_http::{
@@ -35,6 +38,7 @@ use tower_http::{
     timeout::TimeoutLayer,
     trace::TraceLayer,
 };
+use uuid::Uuid;
 
 fn rate_limit_key(
     headers: &axum::http::HeaderMap,
@@ -92,6 +96,10 @@ pub fn router(state: AppState) -> Router {
             get(list_publishers).post(register_publisher_handler),
         )
         .route("/api/v1/publishers/{name}", get(get_publisher))
+        .route(
+            "/api/v1/publishers/{name}/verification",
+            patch(update_publisher_verification),
+        )
         // Token management
         .route(
             "/api/v1/tokens",
@@ -100,6 +108,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/v1/tokens/{id}", delete(revoke_token_handler))
         // Package management
         .route("/api/v1/packages", get(list_packages).post(publish_package))
+        .route("/api/v1/packages/{id}/resolve", get(resolve_package))
         .route(
             "/api/v1/packages/{id}",
             get(get_package).put(update_package).delete(delete_package),
@@ -114,6 +123,10 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/packages/{id}/reviews",
             get(list_reviews).post(add_review),
+        )
+        .route(
+            "/api/v1/packages/{id}/reviews/{review_id}",
+            patch(moderate_review),
         )
         .route("/api/v1/search", get(search_packages))
         .route("/api/v1/categories", get(get_categories))
@@ -175,6 +188,69 @@ async fn get_package(
     Ok(Json(state.repo.get_package(&id).await?))
 }
 
+async fn resolve_package(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(params): Query<ResolveOptions>,
+) -> PalaceResult<Json<ResolutionResponse>> {
+    const MAX_RESOLUTION_PACKAGES: usize = 50_000;
+    let root = state.repo.get_package(&id).await?;
+    if root.yanked {
+        return Err(PalaceError::new(
+            PalaceErrorCode::PackageYanked,
+            "yanked packages cannot be resolved",
+        ));
+    }
+
+    for (name, value) in [
+        ("runtime", params.runtime.as_deref()),
+        ("platform", params.platform.as_deref()),
+    ] {
+        if value.is_some_and(|value| value.trim().is_empty() || value.chars().count() > 128) {
+            return Err(PalaceError::new(
+                PalaceErrorCode::ValidationFailed,
+                format!("{name} must be between 1 and 128 characters"),
+            ));
+        }
+    }
+
+    let options = ResolveOptions {
+        runtime: params
+            .runtime
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        platform: params
+            .platform
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty()),
+    };
+
+    let mut candidates = Vec::new();
+    let mut offset = 0;
+    loop {
+        let pagination = Pagination::new(crate::pagination::MAX_LIMIT, offset)?;
+        let (total, page) = state
+            .repo
+            .list_packages(PackageFilters::default(), pagination)
+            .await?;
+        if total > MAX_RESOLUTION_PACKAGES {
+            return Err(PalaceError::new(
+                PalaceErrorCode::TooLarge,
+                "package graph is too large to resolve in one request",
+            ));
+        }
+        if page.is_empty() {
+            break;
+        }
+        candidates.extend(page);
+        if candidates.len() >= total {
+            break;
+        }
+        offset = candidates.len();
+    }
+
+    Ok(Json(resolve_dependencies(&root, &candidates, options)))
+}
 async fn list_versions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -468,6 +544,18 @@ async fn add_review(
     Path(id): Path<String>,
     Json(req): Json<ReviewRequest>,
 ) -> PalaceResult<(StatusCode, Json<Review>)> {
+    let rl_key = rate_limit_key(
+        &headers,
+        "review",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.review.check(&rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
+
     let auth = authenticate_header(&state, &headers).await?;
     state.repo.get_package(&id).await?;
     if req
@@ -494,10 +582,68 @@ async fn add_review(
         reviewer_id: auth.publisher.id,
         rating: req.rating,
         comment: req.comment,
+        status: ReviewStatus::Published,
+        moderated_by: None,
+        moderation_reason: None,
+        moderated_at: None,
         created_at: chrono::Utc::now(),
     };
     let review = state.repo.add_review(&review).await?;
     Ok((StatusCode::CREATED, Json(review)))
+}
+
+async fn moderate_review(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Path((id, review_id)): Path<(String, uuid::Uuid)>,
+    Json(req): Json<ReviewModerationRequest>,
+) -> PalaceResult<Json<Review>> {
+    let auth = authenticate_header(&state, &headers).await?;
+    if !auth.can_moderate() {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "insufficient role to moderate reviews",
+        ));
+    }
+
+    state.repo.get_package(&id).await?;
+    let reason = req.reason.and_then(|value| {
+        let trimmed = value.trim().to_string();
+        (!trimmed.is_empty()).then_some(trimmed)
+    });
+    if reason.as_ref().is_some_and(|value| value.len() > 500) {
+        return Err(PalaceError::new(
+            PalaceErrorCode::BadRequest,
+            "review moderation reason must be at most 500 characters",
+        ));
+    }
+
+    let review = state
+        .repo
+        .moderate_review(
+            &id,
+            review_id,
+            req.status,
+            auth.publisher.id,
+            reason.clone(),
+        )
+        .await?;
+    state
+        .repo
+        .record_audit_event(&crate::models::AuditEvent {
+            id: uuid::Uuid::new_v4(),
+            event_type: "review.moderated".into(),
+            actor_id: Some(auth.publisher.id),
+            package_id: Some(id),
+            details: Some(serde_json::json!({
+                "review_id": review_id,
+                "status": review.status.as_str(),
+                "reason": reason,
+            })),
+            created_at: chrono::Utc::now(),
+        })
+        .await?;
+    Ok(Json(review))
 }
 
 async fn authenticate_header(
@@ -565,6 +711,60 @@ async fn get_publisher(
     Ok(Json(publisher.into()))
 }
 
+async fn update_publisher_verification(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Path(name): Path<String>,
+    Json(request): Json<PublisherVerificationRequest>,
+) -> PalaceResult<Json<PublisherVerification>> {
+    let auth = authenticate_header(&state, &headers).await?;
+    if !auth.can_moderate() && !auth.can_administer() {
+        return Err(PalaceError::new(
+            PalaceErrorCode::Forbidden,
+            "insufficient role to verify publishers",
+        ));
+    }
+
+    let publisher = state.repo.get_publisher_by_name(&name).await?;
+    let reason = request
+        .reason
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    if reason
+        .as_ref()
+        .is_some_and(|value| value.chars().count() > 500)
+    {
+        return Err(PalaceError::new(
+            PalaceErrorCode::ValidationFailed,
+            "verification reason must be 500 characters or fewer",
+        ));
+    }
+
+    let verification = PublisherVerification {
+        publisher_id: publisher.id,
+        verified: request.verified,
+        verified_at: request.verified.then(Utc::now),
+        verified_by: Some(auth.publisher.id),
+        reason,
+    };
+    let saved = state.repo.set_publisher_verification(&verification).await?;
+    let audit = AuditEvent {
+        id: Uuid::new_v4(),
+        event_type: "publisher_verification_updated".into(),
+        actor_id: Some(auth.publisher.id),
+        package_id: None,
+        details: Some(serde_json::json!({
+            "publisher_id": publisher.id,
+            "publisher_name": publisher.name,
+            "verified": saved.verified,
+            "reason": saved.reason,
+        })),
+        created_at: Utc::now(),
+    };
+    state.repo.record_audit_event(&audit).await?;
+
+    Ok(Json(saved))
+}
 async fn list_publishers(
     State(state): State<Arc<AppState>>,
 ) -> PalaceResult<Json<Vec<PublisherResponse>>> {
