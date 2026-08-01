@@ -107,6 +107,18 @@ async fn postgres_migrates_and_persists_core_registry_records() {
             .unwrap(),
         Some(publisher.id)
     );
+    assert!(repository
+        .record_download_with_context(&package.id, &package.version, Some("integration-key"))
+        .await
+        .unwrap());
+    assert!(!repository
+        .record_download_with_context(&package.id, &package.version, Some("integration-key"))
+        .await
+        .unwrap());
+    assert_eq!(
+        repository.get_package(&package.id).await.unwrap().downloads,
+        1
+    );
 
     repository
         .delete_package(&package.id, publisher.id)

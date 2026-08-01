@@ -41,7 +41,7 @@ The current migrations and adapter persist package ownership and trust state, an
 
 - Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; a distributed deployment still needs a shared limiter.
 - Reviews enforce one review per publisher and can be published or hidden by moderators. Edit/delete workflows and reputation calculation remain out of scope.
-- Discovery endpoints exist, but featured and trending use simple stored package fields. Download events and anti-manipulation rules are not implemented.
+- Discovery endpoints exist, but featured and trending use simple stored package fields. Download events are persisted and the same request context is counted once per hourly bucket; distributed fraud detection and cross-node analytics remain incomplete.
 - The standalone web/ client provides discovery, Pandora/Agent mode filtering, trust filters, and theme switching. User feeds, follows, media, notifications, and social publishing remain out of scope.
 
 ### Registry ecosystem
@@ -71,6 +71,6 @@ The PostgreSQL integration test remains conditional on KOP_TEST_DATABASE_URL; CI
 1. Add concurrent PostgreSQL parity tests for publish, review, download, and trust transitions.
 2. Add invitations, identity verification, and stronger public-registration abuse controls.
 3. Add version constraints, lockfiles, and compatibility decisions beyond the current resolver.
-4. Add deterministic download accounting and anti-manipulation rules for discovery.
+4. Add distributed download fraud detection and stronger anti-manipulation analytics.
 5. Add runtime adapters, package transfer policy, and a machine-generated OpenAPI document.
 6. Configure release signing keys, rotation procedures, and hosted web deployment controls.

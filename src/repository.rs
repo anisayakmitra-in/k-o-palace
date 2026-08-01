@@ -162,6 +162,15 @@ impl PackageRepository {
         dispatch!(self, record_download, id, version)
     }
 
+    pub async fn record_download_with_context(
+        &self,
+        id: &str,
+        version: &str,
+        dedupe_key: Option<&str>,
+    ) -> PalaceResult<bool> {
+        dispatch!(self, record_download_with_context, id, version, dedupe_key)
+    }
+
     pub async fn search(
         &self,
         query: &str,

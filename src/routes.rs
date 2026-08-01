@@ -65,6 +65,16 @@ fn rate_limit_key(
         crate::security::sha256_hex(identity.as_bytes())
     )
 }
+
+fn download_dedupe_key(headers: &axum::http::HeaderMap, trust_forwarded: bool) -> String {
+    let rate_key = rate_limit_key(headers, "download", trust_forwarded);
+    let user_agent = headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    crate::security::sha256_hex(format!("{rate_key}:ua:{user_agent}").as_bytes())
+}
+
 pub fn router(state: AppState) -> Router {
     let cors = if state.config.security.cors_origins.is_empty() {
         CorsLayer::new()
@@ -501,6 +511,7 @@ async fn download_package(
         ));
     }
 
+    let dedupe_key = download_dedupe_key(&headers, state.config.security.trust_forwarded_headers);
     let package = state.repo.get_package(&id).await?;
     if package.yanked {
         return Err(PalaceError::new(
@@ -525,7 +536,10 @@ async fn download_package(
     .await?;
 
     // Record download
-    state.repo.record_download(&id, &package.version).await?;
+    state
+        .repo
+        .record_download_with_context(&id, &package.version, Some(&dedupe_key))
+        .await?;
 
     // Redirect to the artifact URL
     Ok(Redirect::temporary(&artifact_url))

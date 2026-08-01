@@ -4,11 +4,14 @@ use crate::error::{PalaceError, PalaceErrorCode, PalaceResult};
 use crate::models::*;
 use crate::pagination::Pagination;
 use crate::repository::PackageFilters;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
+
+type DownloadDedupeKey = (String, String, String);
+type DownloadDedupeMap = HashMap<DownloadDedupeKey, chrono::DateTime<Utc>>;
 
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryRepository {
@@ -20,6 +23,7 @@ pub struct InMemoryRepository {
     reviews: Arc<RwLock<HashMap<String, Vec<Review>>>>,
     transitions: Arc<RwLock<HashMap<String, Vec<TrustTransition>>>>,
     audit: Arc<RwLock<Vec<AuditEvent>>>,
+    download_dedup: Arc<RwLock<DownloadDedupeMap>>,
     artifacts: Arc<RwLock<HashMap<(String, String), crate::repository::VerifiedArtifact>>>,
 }
 
@@ -345,13 +349,48 @@ impl InMemoryRepository {
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
+        self.record_download_with_context(id, version, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn record_download_with_context(
+        &self,
+        id: &str,
+        version: &str,
+        dedupe_key: Option<&str>,
+    ) -> PalaceResult<bool> {
+        if let Some(dedupe_key) = dedupe_key {
+            let mut dedup = self.download_dedup.write().await;
+            let cutoff = Utc::now() - Duration::hours(1);
+            dedup.retain(|_, timestamp| *timestamp >= cutoff);
+            let key = (id.to_string(), version.to_string(), dedupe_key.to_string());
+            if dedup.contains_key(&key) {
+                return Ok(false);
+            }
+
+            let mut map = self.packages.write().await;
+            let versions = map
+                .get_mut(id)
+                .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+            if let Some(pkg) = versions.iter_mut().find(|p| p.version == version) {
+                pkg.downloads += 1;
+                dedup.insert(key, Utc::now());
+                return Ok(true);
+            }
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package version not found",
+            ));
+        }
+
         let mut map = self.packages.write().await;
         let versions = map
             .get_mut(id)
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
         if let Some(pkg) = versions.iter_mut().find(|p| p.version == version) {
             pkg.downloads += 1;
-            return Ok(());
+            return Ok(true);
         }
         Err(PalaceError::new(
             PalaceErrorCode::NotFound,

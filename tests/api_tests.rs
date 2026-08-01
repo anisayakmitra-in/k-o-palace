@@ -376,6 +376,38 @@ async fn missing_download_version_is_rejected() {
 }
 
 #[tokio::test]
+async fn download_accounting_deduplicates_same_context_for_one_hour() {
+    let state = test_state();
+    let package = valid_pkg("downloaded");
+    state.repo.publish_package(&package).await.unwrap();
+
+    assert!(state
+        .repo
+        .record_download_with_context(&package.id, &package.version, Some("client-key"))
+        .await
+        .unwrap());
+    assert!(!state
+        .repo
+        .record_download_with_context(&package.id, &package.version, Some("client-key"))
+        .await
+        .unwrap());
+    assert_eq!(
+        state.repo.get_package(&package.id).await.unwrap().downloads,
+        1
+    );
+
+    assert!(state
+        .repo
+        .record_download_with_context(&package.id, &package.version, Some("other-client"))
+        .await
+        .unwrap());
+    assert_eq!(
+        state.repo.get_package(&package.id).await.unwrap().downloads,
+        2
+    );
+}
+
+#[tokio::test]
 async fn publisher_cannot_moderate_review() {
     let state = test_state();
     let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)

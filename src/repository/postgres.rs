@@ -751,11 +751,61 @@ impl PostgresRepository {
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
+        self.record_download_with_context(id, version, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn record_download_with_context(
+        &self,
+        id: &str,
+        version: &str,
+        dedupe_key: Option<&str>,
+    ) -> PalaceResult<bool> {
         let mut transaction = self
             .pool
             .begin()
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+
+        if let Some(dedupe_key) = dedupe_key {
+            let exists =
+                sqlx::query("SELECT 1 FROM packages WHERE id = $1 AND version = $2 FOR SHARE")
+                    .bind(id)
+                    .bind(version)
+                    .fetch_optional(&mut *transaction)
+                    .await
+                    .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            if exists.is_none() {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::NotFound,
+                    "package version not found",
+                ));
+            }
+
+            let result = sqlx::query(
+                r#"
+                INSERT INTO download_events
+                    (package_id, package_version, ip_hash, dedupe_key, bucket_start)
+                VALUES ($1, $2, NULL, $3, date_trunc('hour', NOW()))
+                ON CONFLICT (package_id, package_version, dedupe_key, bucket_start) DO NOTHING
+                "#,
+            )
+            .bind(id)
+            .bind(version)
+            .bind(dedupe_key)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            if result.rows_affected() == 0 {
+                transaction
+                    .commit()
+                    .await
+                    .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                return Ok(false);
+            }
+        }
+
         let result = sqlx::query(
             "UPDATE packages SET downloads = downloads + 1 WHERE id = $1 AND version = $2",
         )
@@ -770,16 +820,23 @@ impl PostgresRepository {
                 "package version not found",
             ));
         }
-        sqlx::query("INSERT INTO download_events (package_id, package_version) VALUES ($1, $2)")
+
+        if dedupe_key.is_none() {
+            sqlx::query(
+                "INSERT INTO download_events (package_id, package_version) VALUES ($1, $2)",
+            )
             .bind(id)
             .bind(version)
             .execute(&mut *transaction)
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        }
+
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        Ok(true)
     }
 
     pub async fn search(
