@@ -10,6 +10,14 @@ use chrono::Utc;
 use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
 
+fn repository_error(error: impl std::fmt::Display) -> PalaceError {
+    tracing::error!(error = %error, "PostgreSQL repository operation failed");
+    PalaceError::new(
+        PalaceErrorCode::ServerError,
+        "repository operation failed",
+    )
+}
+
 /// Helper struct for SQLx row mapping.
 #[derive(sqlx::FromRow)]
 struct PackageRow {
@@ -89,7 +97,7 @@ impl PostgresRepository {
             .max_connections(max_connections.max(1))
             .connect(url)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         Ok(Self { pool })
     }
 
@@ -101,7 +109,7 @@ impl PostgresRepository {
         sqlx::migrate!()
             .run(&self.pool)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
 
     pub async fn is_healthy(&self) -> bool {
@@ -135,7 +143,7 @@ impl PostgresRepository {
         .bind(publisher.created_at)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         if let Some(r) = row {
             Ok(Publisher {
@@ -162,7 +170,7 @@ impl PostgresRepository {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "publisher not found"))?;
 
         Ok(Publisher {
@@ -183,7 +191,7 @@ impl PostgresRepository {
         .bind(name)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "publisher not found"))?;
 
         Ok(Publisher {
@@ -203,7 +211,7 @@ impl PostgresRepository {
         )
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| PalaceError::new(PalaceErrorCode::ServerError, error.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows
             .into_iter()
@@ -227,7 +235,7 @@ impl PostgresRepository {
         .bind(role.as_str())
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "publisher not found"))?;
 
         Ok(Publisher {
@@ -262,7 +270,7 @@ impl PostgresRepository {
         .bind(publisher_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|error| PalaceError::new(PalaceErrorCode::ServerError, error.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(row
             .map(|row| PublisherVerification {
@@ -285,6 +293,23 @@ impl PostgresRepository {
         &self,
         verification: &PublisherVerification,
     ) -> PalaceResult<PublisherVerification> {
+        let event = crate::repository::publisher_verification_audit(verification);
+        self.set_publisher_verification_with_audit(verification, &event)
+            .await
+    }
+
+    pub async fn set_publisher_verification_with_audit(
+        &self,
+        verification: &PublisherVerification,
+        event: &AuditEvent,
+    ) -> PalaceResult<PublisherVerification> {
+        self.get_publisher_by_id(verification.publisher_id).await?;
+        if let Some(verifier_id) = verification.verified_by {
+            self.get_publisher_by_id(verifier_id).await?;
+        }
+        crate::repository::validate_publisher_verification_audit(verification, event)?;
+
+        let mut transaction = self.pool.begin().await.map_err(repository_error)?;
         let row = sqlx::query_as::<
             _,
             (
@@ -311,10 +336,35 @@ impl PostgresRepository {
         .bind(verification.verified_at)
         .bind(verification.verified_by)
         .bind(&verification.reason)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *transaction)
         .await
-        .map_err(|error| PalaceError::new(PalaceErrorCode::ServerError, error.to_string()))?;
+        .map_err(repository_error)?;
 
+        sqlx::query(
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
+        )
+        .bind(event.id)
+        .bind(&event.event_type)
+        .bind(event.actor_id)
+        .bind(event.package_id.as_ref().map(|_| "package"))
+        .bind(&event.package_id)
+        .bind(event.details.clone().unwrap_or_else(|| serde_json::json!({})))
+        .bind(event.created_at)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            if error
+                .as_database_error()
+                .is_some_and(|database_error| database_error.is_unique_violation())
+            {
+                PalaceError::new(PalaceErrorCode::Conflict, "audit event already exists")
+            } else {
+                repository_error(error)
+            }
+        })?;
+
+        transaction.commit().await.map_err(repository_error)?;
         Ok(PublisherVerification {
             publisher_id: row.0,
             verified: row.1,
@@ -323,6 +373,7 @@ impl PostgresRepository {
             reason: row.4,
         })
     }
+
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         sqlx::query(
             "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
@@ -339,7 +390,7 @@ impl PostgresRepository {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+        .map_err(repository_error)
     }
 
     pub async fn create_api_token_with_audit(
@@ -351,7 +402,7 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         sqlx::query(
             "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
@@ -366,7 +417,7 @@ impl PostgresRepository {
         .bind(serde_json::to_value(&token.scopes).unwrap_or_default())
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         sqlx::query(
             "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
@@ -379,11 +430,11 @@ impl PostgresRepository {
         .bind(event.created_at)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
         let id = crate::repository::token_id_from_opaque(plaintext).ok_or_else(|| {
@@ -407,7 +458,7 @@ impl PostgresRepository {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .map(|row| ApiToken {
             id: row.0,
             publisher_id: row.1,
@@ -427,7 +478,7 @@ impl PostgresRepository {
             .execute(&self.pool)
             .await
             .map(|_| ())
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
     pub async fn revoke_api_token(&self, id: Uuid) -> PalaceResult<()> {
         sqlx::query("UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1")
@@ -435,7 +486,7 @@ impl PostgresRepository {
             .execute(&self.pool)
             .await
             .map(|_| ())
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
 
     pub async fn revoke_api_token_with_audit(
@@ -447,12 +498,12 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         let result = sqlx::query("UPDATE api_tokens SET revoked_at = NOW() WHERE id = $1")
             .bind(id)
             .execute(&mut *transaction)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -471,11 +522,11 @@ impl PostgresRepository {
         .bind(event.created_at)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
         let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
@@ -484,7 +535,7 @@ impl PostgresRepository {
         .bind(publisher_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows
             .into_iter()
@@ -513,12 +564,12 @@ impl PostgresRepository {
         .bind(pagination.offset as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM packages")
             .fetch_one(&self.pool)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
 
         Ok((
             total as usize,
@@ -533,7 +584,7 @@ impl PostgresRepository {
         .bind(id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
 
         Ok(row.into())
@@ -546,7 +597,7 @@ impl PostgresRepository {
         .bind(id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         match owners.as_slice() {
             [] => Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -564,7 +615,7 @@ impl PostgresRepository {
         .bind(version)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package version not found"))?;
 
         Ok(row.into())
@@ -577,7 +628,7 @@ impl PostgresRepository {
         .bind(id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows
             .into_iter()
@@ -591,12 +642,7 @@ impl PostgresRepository {
     }
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
-        let actor_id = match self.get_publisher_by_name(&package.trust.publisher).await {
-            Ok(publisher) => Some(publisher.id),
-            Err(error) if error.code == PalaceErrorCode::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        self.publish_verified_package(package, None, actor_id).await
+        self.publish_verified_package(package, None, None).await
     }
 
     pub async fn publish_verified_package(
@@ -610,9 +656,14 @@ impl PostgresRepository {
         } else {
             None
         };
-        if let Some(actor_name) = actor_name.as_deref() {
-            if package.id.contains('/') && crate::identity::namespace_of(&package.id) != actor_name
-            {
+        if package.id.contains('/') {
+            let Some(actor_name) = actor_name.as_deref() else {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "publisher identity is required for namespaced packages",
+                ));
+            };
+            if crate::identity::namespace_of(&package.id) != actor_name {
                 return Err(PalaceError::new(
                     PalaceErrorCode::Forbidden,
                     "cannot publish under another publisher namespace",
@@ -624,7 +675,7 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         let tags_json = serde_json::to_value(&package.tags).unwrap_or_default();
         let caps_json = serde_json::to_value(&package.capabilities).unwrap_or_default();
         let compat_json = serde_json::to_value(&package.compatibility).unwrap_or_default();
@@ -633,7 +684,7 @@ impl PostgresRepository {
             .bind(&package.id)
             .execute(&mut *transaction)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
 
         let existing_versions = sqlx::query_as::<_, (String, Option<Uuid>)>(
             "SELECT version, publisher_id FROM packages WHERE id = $1 FOR UPDATE",
@@ -641,7 +692,7 @@ impl PostgresRepository {
         .bind(&package.id)
         .fetch_all(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         if let Some(actor_id) = actor_id {
             if existing_versions
@@ -696,7 +747,7 @@ impl PostgresRepository {
         .bind(&package.trust.signature)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
@@ -717,7 +768,7 @@ impl PostgresRepository {
             .bind(artifact.size_bytes)
             .execute(&mut *transaction)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
 
             if let (Some(public_key), Some(signature)) = (&artifact.public_key, &artifact.signature)
             {
@@ -730,7 +781,7 @@ impl PostgresRepository {
                 .bind(signature)
                 .execute(&mut *transaction)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
             }
         }
 
@@ -746,12 +797,12 @@ impl PostgresRepository {
         .bind(package.created_at)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         Ok(package.clone())
     }
 
@@ -767,13 +818,13 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         let result =
             sqlx::query("UPDATE packages SET yanked = TRUE, updated_at = NOW() WHERE id = $1")
                 .bind(id)
                 .execute(&mut *transaction)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -791,11 +842,11 @@ impl PostgresRepository {
         .bind(serde_json::json!({"all_versions": true}))
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
@@ -814,7 +865,7 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
 
         if let Some(dedupe_key) = dedupe_key {
             let exists =
@@ -823,7 +874,7 @@ impl PostgresRepository {
                     .bind(version)
                     .fetch_optional(&mut *transaction)
                     .await
-                    .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                    .map_err(repository_error)?;
             if exists.is_none() {
                 return Err(PalaceError::new(
                     PalaceErrorCode::NotFound,
@@ -844,12 +895,12 @@ impl PostgresRepository {
             .bind(dedupe_key)
             .execute(&mut *transaction)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
             if result.rows_affected() == 0 {
                 transaction
                     .commit()
                     .await
-                    .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                    .map_err(repository_error)?;
                 return Ok(false);
             }
         }
@@ -861,7 +912,7 @@ impl PostgresRepository {
         .bind(version)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -877,13 +928,13 @@ impl PostgresRepository {
             .bind(version)
             .execute(&mut *transaction)
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         }
 
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         Ok(true)
     }
 
@@ -901,7 +952,7 @@ impl PostgresRepository {
         .bind(pagination.offset as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         let total: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM packages WHERE name ILIKE $1 OR description ILIKE $1",
@@ -909,7 +960,7 @@ impl PostgresRepository {
         .bind(&pattern)
         .fetch_one(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok((
             total as usize,
@@ -924,7 +975,7 @@ impl PostgresRepository {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows.into_iter().map(Package::from).collect())
     }
@@ -936,7 +987,7 @@ impl PostgresRepository {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows.into_iter().map(Package::from).collect())
     }
@@ -948,7 +999,7 @@ impl PostgresRepository {
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows.into_iter().map(Package::from).collect())
     }
@@ -958,7 +1009,7 @@ impl PostgresRepository {
             sqlx::query_as("SELECT tags FROM packages LIMIT 10000")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
 
         let mut cats = std::collections::BTreeSet::new();
         for (tags,) in rows {
@@ -976,7 +1027,7 @@ impl PostgresRepository {
             sqlx::query_as("SELECT compatibility FROM packages LIMIT 10000")
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
 
         let mut runtimes = std::collections::BTreeSet::new();
         for (compat,) in rows {
@@ -1002,7 +1053,7 @@ impl PostgresRepository {
         .bind(review.created_at)
         .execute(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::Conflict,
@@ -1023,7 +1074,7 @@ impl PostgresRepository {
         .bind(package_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows
             .into_iter()
@@ -1060,7 +1111,7 @@ impl PostgresRepository {
         .bind(package_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
         Ok(Review {
             id: row.0,
@@ -1089,7 +1140,7 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         let row = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)>(
             "UPDATE reviews SET status = $1, moderated_by = $2, moderation_reason = $3, moderated_at = NOW() WHERE id = $4 AND package_id = $5 RETURNING id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at"
         )
@@ -1100,7 +1151,7 @@ impl PostgresRepository {
         .bind(package_id)
         .fetch_optional(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
+        .map_err(repository_error)?
         .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
         let review = Review {
             id: row.0,
@@ -1126,11 +1177,11 @@ impl PostgresRepository {
         .bind(event.created_at)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         Ok(review)
     }
 
@@ -1139,7 +1190,7 @@ impl PostgresRepository {
             .pool
             .begin()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+            .map_err(repository_error)?;
         sqlx::query(
             "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
@@ -1152,7 +1203,7 @@ impl PostgresRepository {
         .bind(transition.created_at)
         .execute(&mut *transaction)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         let result =
             sqlx::query("UPDATE packages SET trust_level = $1, updated_at = NOW() WHERE id = $2")
@@ -1160,7 +1211,7 @@ impl PostgresRepository {
                 .bind(&transition.package_id)
                 .execute(&mut *transaction)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -1170,7 +1221,7 @@ impl PostgresRepository {
         transaction
             .commit()
             .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+            .map_err(repository_error)
     }
 
     pub async fn list_trust_transitions(
@@ -1183,7 +1234,7 @@ impl PostgresRepository {
         .bind(package_id)
         .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        .map_err(repository_error)?;
 
         Ok(rows
             .into_iter()
@@ -1213,7 +1264,7 @@ impl PostgresRepository {
         .execute(&self.pool)
         .await
         .map(|_| ())
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
+        .map_err(repository_error)
     }
 
     pub async fn yank_package(&self, id: &str, version: &str) -> PalaceResult<()> {
@@ -1223,7 +1274,7 @@ impl PostgresRepository {
                 .bind(version)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -1240,7 +1291,7 @@ impl PostgresRepository {
                 .bind(version)
                 .execute(&self.pool)
                 .await
-                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+                .map_err(repository_error)?;
         if result.rows_affected() == 0 {
             return Err(PalaceError::new(
                 PalaceErrorCode::NotFound,
@@ -1248,5 +1299,19 @@ impl PostgresRepository {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::repository_error;
+
+    #[test]
+    fn repository_errors_redact_database_details() {
+        let error = repository_error("password=top-secret host=database.internal");
+
+        assert_eq!(error.message, "repository operation failed");
+        assert!(!error.message.contains("top-secret"));
+        assert!(!error.message.contains("database.internal"));
     }
 }

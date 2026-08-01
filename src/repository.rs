@@ -19,6 +19,44 @@ pub struct VerifiedArtifact {
     pub public_key: Option<String>,
 }
 
+pub(crate) fn publisher_verification_audit(
+    verification: &PublisherVerification,
+) -> AuditEvent {
+    AuditEvent {
+        id: Uuid::now_v7(),
+        event_type: "publisher_verification_updated".into(),
+        actor_id: verification.verified_by,
+        package_id: None,
+        details: Some(serde_json::json!({
+            "publisher_id": verification.publisher_id,
+            "verified": verification.verified,
+            "reason": verification.reason,
+        })),
+        created_at: chrono::Utc::now(),
+    }
+}
+
+pub(crate) fn validate_publisher_verification_audit(
+    verification: &PublisherVerification,
+    event: &AuditEvent,
+) -> PalaceResult<()> {
+    let details_match = event.details.as_ref().is_some_and(|details| {
+        details.get("publisher_id") == Some(&serde_json::json!(verification.publisher_id))
+            && details.get("verified") == Some(&serde_json::json!(verification.verified))
+    });
+    if event.event_type != "publisher_verification_updated"
+        || event.actor_id != verification.verified_by
+        || event.package_id.is_some()
+        || !details_match
+    {
+        return Err(crate::error::PalaceError::new(
+            crate::error::PalaceErrorCode::BadRequest,
+            "publisher verification audit does not match the verification",
+        ));
+    }
+    Ok(())
+}
+
 /// Repository backend variants.
 #[derive(Debug, Clone)]
 pub enum PackageRepository {
@@ -75,6 +113,19 @@ impl PackageRepository {
         verification: &PublisherVerification,
     ) -> PalaceResult<PublisherVerification> {
         dispatch!(self, set_publisher_verification, verification)
+    }
+
+    pub async fn set_publisher_verification_with_audit(
+        &self,
+        verification: &PublisherVerification,
+        event: &AuditEvent,
+    ) -> PalaceResult<PublisherVerification> {
+        dispatch!(
+            self,
+            set_publisher_verification_with_audit,
+            verification,
+            event
+        )
     }
     pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
         dispatch!(self, list_publishers,)

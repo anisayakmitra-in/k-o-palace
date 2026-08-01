@@ -137,11 +137,36 @@ impl InMemoryRepository {
         &self,
         verification: &PublisherVerification,
     ) -> PalaceResult<PublisherVerification> {
+        let event = crate::repository::publisher_verification_audit(verification);
+        self.set_publisher_verification_with_audit(verification, &event)
+            .await
+    }
+
+    pub async fn set_publisher_verification_with_audit(
+        &self,
+        verification: &PublisherVerification,
+        event: &AuditEvent,
+    ) -> PalaceResult<PublisherVerification> {
         self.get_publisher_by_id(verification.publisher_id).await?;
-        let mut map = self.verifications.write().await;
-        map.insert(verification.publisher_id, verification.clone());
+        if let Some(verifier_id) = verification.verified_by {
+            self.get_publisher_by_id(verifier_id).await?;
+        }
+        crate::repository::validate_publisher_verification_audit(verification, event)?;
+
+        let mut verifications = self.verifications.write().await;
+        let mut audit = self.audit.write().await;
+        if audit.iter().any(|existing| existing.id == event.id) {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Conflict,
+                "audit event already exists",
+            ));
+        }
+
+        verifications.insert(verification.publisher_id, verification.clone());
+        audit.push(event.clone());
         Ok(verification.clone())
     }
+
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         let mut map = self.tokens.write().await;
         map.insert(token.id, token.clone());
@@ -283,12 +308,7 @@ impl InMemoryRepository {
     }
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
-        let actor_id = match self.get_publisher_by_name(&package.trust.publisher).await {
-            Ok(publisher) => Some(publisher.id),
-            Err(error) if error.code == PalaceErrorCode::NotFound => None,
-            Err(error) => return Err(error),
-        };
-        self.publish_verified_package(package, None, actor_id).await
+        self.publish_verified_package(package, None, None).await
     }
 
     pub async fn publish_verified_package(
@@ -302,9 +322,14 @@ impl InMemoryRepository {
         } else {
             None
         };
-        if let Some(actor_name) = actor_name.as_deref() {
-            if package.id.contains('/') && crate::identity::namespace_of(&package.id) != actor_name
-            {
+        if package.id.contains('/') {
+            let Some(actor_name) = actor_name.as_deref() else {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "publisher identity is required for namespaced packages",
+                ));
+            };
+            if crate::identity::namespace_of(&package.id) != actor_name {
                 return Err(PalaceError::new(
                     PalaceErrorCode::Forbidden,
                     "cannot publish under another publisher namespace",

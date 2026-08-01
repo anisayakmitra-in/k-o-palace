@@ -4,7 +4,7 @@ use chrono::Utc;
 use k_o_palace::{
     auth::create_api_token,
     models::{
-        AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher, Review,
+        AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher, PublisherVerification, Review,
         ReviewStatus, Role, TrustInfo, TrustLevel,
     },
     repository::{postgres::PostgresRepository, PackageRepository},
@@ -168,4 +168,68 @@ async fn postgres_migrates_and_persists_core_registry_records() {
         })
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn postgres_publisher_verification_and_audit_are_atomic() {
+    let Some(url) = database_url() else {
+        return;
+    };
+    let repository = PostgresRepository::new(&url).await.unwrap();
+    repository.migrate().await.unwrap();
+    let repository = PackageRepository::Postgres(repository);
+
+    let target = Publisher {
+        id: Uuid::new_v4(),
+        name: format!("target{}", Uuid::new_v4().simple()),
+        display_name: "Verification Target".into(),
+        email: None,
+        website: None,
+        role: Role::Publisher,
+        created_at: Utc::now(),
+    };
+    let moderator = Publisher {
+        id: Uuid::new_v4(),
+        name: format!("moderator{}", Uuid::new_v4().simple()),
+        display_name: "Verification Moderator".into(),
+        email: None,
+        website: None,
+        role: Role::Moderator,
+        created_at: Utc::now(),
+    };
+    repository.create_publisher(&target).await.unwrap();
+    repository.create_publisher(&moderator).await.unwrap();
+
+    let duplicate_audit = AuditEvent {
+        id: Uuid::new_v4(),
+        event_type: "publisher_verification_updated".into(),
+        actor_id: Some(moderator.id),
+        package_id: None,
+        details: Some(serde_json::json!({
+            "publisher_id": target.id,
+            "verified": true,
+        })),
+        created_at: Utc::now(),
+    };
+    repository.record_audit_event(&duplicate_audit).await.unwrap();
+
+    let verification = PublisherVerification {
+        publisher_id: target.id,
+        verified: true,
+        verified_at: Some(Utc::now()),
+        verified_by: Some(moderator.id),
+        reason: Some("reviewed".into()),
+    };
+    let error = repository
+        .set_publisher_verification_with_audit(&verification, &duplicate_audit)
+        .await
+        .unwrap_err();
+
+    assert_eq!(error.code, k_o_palace::error::PalaceErrorCode::Conflict);
+    assert_eq!(error.message, "repository operation failed");
+    assert!(!repository
+        .get_publisher_verification(target.id)
+        .await
+        .unwrap()
+        .verified);
 }
