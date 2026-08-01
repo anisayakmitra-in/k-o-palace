@@ -55,8 +55,6 @@ impl AuthContext {
 
     pub fn can_issue_scope(&self, scope: &str) -> bool {
         self.has_scope(scope)
-            || (scope == "moderation:write" && self.publisher.role.can_moderate())
-            || (scope == "admin:write" && self.publisher.role.can_administer())
     }
 
     pub fn owns(&self, package_publisher: &str) -> bool {

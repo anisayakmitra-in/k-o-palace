@@ -7,7 +7,9 @@ use k_o_palace::{
     app::AppState,
     auth::register_publisher,
     config::PalaceConfig,
-    models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind, TrustInfo, TrustLevel},
+    models::{
+        CapabilityInfo, CompatibilityInfo, Package, PackageKind, Role, TrustInfo, TrustLevel,
+    },
     routes::router,
 };
 use tower::ServiceExt;
@@ -124,6 +126,34 @@ async fn update_unauthenticated_fails() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn scoped_role_token_cannot_delegate_unheld_authority() {
+    let state = test_state();
+    let (publisher, default_token) =
+        register_publisher(&state.repo, "moderator", "Moderator", None, None)
+            .await
+            .unwrap();
+    state
+        .repo
+        .update_publisher_role(publisher.id, Role::Moderator)
+        .await
+        .unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/tokens")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {default_token}"))
+                .body(Body::from(
+                    r#"{"name":"delegated","scopes":["moderation:write"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
 #[tokio::test]
 async fn malformed_manifest_rejected() {
     let state = test_state();
