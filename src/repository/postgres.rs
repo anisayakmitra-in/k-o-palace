@@ -199,7 +199,7 @@ impl PostgresRepository {
 
     pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
         let rows = sqlx::query_as::<_, (Uuid, String, String, Option<String>, Option<String>, String, chrono::DateTime<Utc>)>(
-            "SELECT id, name, display_name, email, website, role, created_at FROM publishers ORDER BY name ASC"
+            "SELECT id, name, display_name, email, website, role, created_at FROM publishers ORDER BY name ASC LIMIT 10000"
         )
         .fetch_all(&self.pool)
         .await
@@ -479,7 +479,7 @@ impl PostgresRepository {
     }
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
         let rows = sqlx::query_as::<_, (Uuid, Uuid, String, String, chrono::DateTime<Utc>, Option<chrono::DateTime<Utc>>, Option<chrono::DateTime<Utc>>, serde_json::Value)>(
-            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC"
+            "SELECT id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes FROM api_tokens WHERE publisher_id = $1 ORDER BY created_at DESC LIMIT 1000"
         )
         .bind(publisher_id)
         .fetch_all(&self.pool)
@@ -954,10 +954,11 @@ impl PostgresRepository {
     }
 
     pub async fn categories(&self) -> PalaceResult<Vec<String>> {
-        let rows: Vec<(serde_json::Value,)> = sqlx::query_as("SELECT tags FROM packages")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        let rows: Vec<(serde_json::Value,)> =
+            sqlx::query_as("SELECT tags FROM packages LIMIT 10000")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
         let mut cats = std::collections::BTreeSet::new();
         for (tags,) in rows {
@@ -967,14 +968,15 @@ impl PostgresRepository {
                 }
             }
         }
-        Ok(cats.into_iter().collect())
+        Ok(cats.into_iter().take(1_000).collect())
     }
 
     pub async fn runtimes(&self) -> PalaceResult<Vec<String>> {
-        let rows: Vec<(serde_json::Value,)> = sqlx::query_as("SELECT compatibility FROM packages")
-            .fetch_all(&self.pool)
-            .await
-            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        let rows: Vec<(serde_json::Value,)> =
+            sqlx::query_as("SELECT compatibility FROM packages LIMIT 10000")
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
         let mut runtimes = std::collections::BTreeSet::new();
         for (compat,) in rows {
@@ -984,7 +986,7 @@ impl PostgresRepository {
                 }
             }
         }
-        Ok(runtimes.into_iter().collect())
+        Ok(runtimes.into_iter().take(1_000).collect())
     }
 
     pub async fn add_review(&self, review: &Review) -> PalaceResult<Review> {
@@ -1016,7 +1018,7 @@ impl PostgresRepository {
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
         let rows = sqlx::query_as::<_, (Uuid, String, Uuid, i32, Option<String>, String, Option<Uuid>, Option<String>, Option<chrono::DateTime<Utc>>, chrono::DateTime<Utc>)>(
-            "SELECT id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at FROM reviews WHERE package_id = $1 AND status = 'published' ORDER BY created_at DESC"
+            "SELECT id, package_id, publisher_id, rating, comment, status, moderated_by, moderation_reason, moderated_at, created_at FROM reviews WHERE package_id = $1 AND status = 'published' ORDER BY created_at DESC LIMIT 100"
         )
         .bind(package_id)
         .fetch_all(&self.pool)

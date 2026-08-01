@@ -26,6 +26,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .init();
 
     let config = PalaceConfig::from_env();
+    if config.security.require_https_in_production && !config.server.bind_addr.ip().is_loopback() {
+        let public_url = url::Url::parse(&config.server.public_url).map_err(|_| {
+            "PALACE_PUBLIC_URL must be a valid URL when HTTPS enforcement is enabled"
+        })?;
+        if public_url.scheme() != "https" {
+            return Err("PALACE_PUBLIC_URL must use https when binding beyond localhost".into());
+        }
+    }
     #[cfg(feature = "postgres")]
     let state = AppState::postgres(config.clone()).await?;
     #[cfg(not(feature = "postgres"))]
@@ -40,9 +48,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let addr = config.server.bind_addr;
     let app = router(state);
 
-    tracing::info!("K-O Palace listening on http://{}", addr);
-    tracing::info!("  API:    http://{}/api/v1/packages", addr);
-    tracing::info!("  Health: http://{}/health", addr);
+    tracing::info!("K-O Palace listening on {}", config.server.public_url);
+    tracing::info!(
+        "  API:    {}/api/v1/packages",
+        config.server.public_url.trim_end_matches('/')
+    );
+    tracing::info!(
+        "  Health: {}/health",
+        config.server.public_url.trim_end_matches('/')
+    );
 
     let listener = tokio::net::TcpListener::bind(addr).await.map_err(|e| {
         tracing::error!("failed to bind to {}: {}", addr, e);

@@ -88,14 +88,16 @@ cargo run --no-default-features
 |---|---|---|
 | `PALACE_BIND` | `127.0.0.1:3001` | Server bind address |
 | `PALACE_PUBLIC_URL` | `http://127.0.0.1:3001` | Public URL for downloads |
-| `DATABASE_URL` | `postgres://...` | PostgreSQL connection string |
+| `DATABASE_URL` | required for PostgreSQL | PostgreSQL connection string; no credentialed default is used |
 | `PALACE_DB_MAX_CONNECTIONS` | `10` | PostgreSQL pool maximum |
 | `PALACE_CORS_ORIGINS` | (empty) | Comma-separated allowed origins |
 | `PALACE_SEED_SAMPLES` | `false` | Seed sample packages on startup |
 | `PALACE_RATE_LIMIT_PUBLISH_PER_MINUTE` | `10` | Publish requests per minute per limiter key |
 | `PALACE_RATE_LIMIT_SEARCH_PER_MINUTE` | `120` | Search requests per minute per limiter key |
 | `PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE` | `240` | Download requests per minute per limiter key |
-| `PALACE_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Authentication requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Authentication and registration requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_RESOLVE_PER_MINUTE` | `60` | Dependency resolution requests per minute per limiter key |
+| `PALACE_REQUIRE_HTTPS` | `true` | Require an HTTPS public URL when binding beyond localhost |
 
 ## PostgreSQL Setup
 
@@ -227,7 +229,7 @@ All endpoints are versioned under `/api/v1`. Breaking changes require a new API 
 - **Trust levels** with explicit server-enforced transitions, backed by publisher verification for identified publishers
 - **Signatures**: Ed25519 verified server-side
 - **Content hash**: SHA-256 verified against uploaded artifact
-- **Artifacts**: HTTPS-only, host allowlisted, redirect-limited, size-limited, content-type validated
+- **Artifacts**: HTTPS-only, host allowlisted, redirect-limited, size-limited, content-type validated, streamed as attachments with nosniff
 - **CORS**: Configured origins only, never permissive
 - **Rate limits**: Publish (10/min), Search (120/min), Download (240/min), Auth (10/min)
 - **Request limits**: 16 MB body, 30 second timeout

@@ -125,6 +125,12 @@ fn sample_packages() -> Vec<Package> {
 #[cfg(feature = "postgres")]
 impl AppState {
     pub async fn postgres(config: PalaceConfig) -> Result<Self, crate::error::PalaceError> {
+        if config.database.url.trim().is_empty() {
+            return Err(crate::error::PalaceError::new(
+                crate::error::PalaceErrorCode::ServerError,
+                "DATABASE_URL is required for the PostgreSQL backend",
+            ));
+        }
         let storage = ArtifactStorage::from_config(&config);
         storage.ensure_supported()?;
         let repository = crate::repository::postgres::PostgresRepository::new_with_max_connections(

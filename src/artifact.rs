@@ -6,7 +6,7 @@ use crate::models::TrustInfo;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 #[cfg(feature = "reqwest")]
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 #[cfg(feature = "reqwest")]
 use tokio_util::io::ReaderStream;
 use url::Url;
@@ -327,7 +327,7 @@ async fn fetch_and_verify_package_artifact_file(
     };
 
     let mut redirect_count = 0u32;
-    let (content_type, size, hash) = loop {
+    let (content_type, size, hash, mut file) = loop {
         validate_artifact_destination(&next_url, config).await?;
         let response = client.get(next_url.clone()).send().await.map_err(|error| {
             PalaceError::new(
@@ -393,6 +393,7 @@ async fn fetch_and_verify_package_artifact_file(
         }
 
         let mut file = tokio::fs::OpenOptions::new()
+            .read(true)
             .write(true)
             .create_new(true)
             .open(&temporary.path)
@@ -433,7 +434,7 @@ async fn fetch_and_verify_package_artifact_file(
                 format!("failed to flush temporary artifact: {error}"),
             )
         })?;
-        break (content_type, size, hex::encode(hasher.finalize()));
+        break (content_type, size, hex::encode(hasher.finalize()), file);
     };
 
     let expected = trust
@@ -462,7 +463,16 @@ async fn fetch_and_verify_package_artifact_file(
                     "signed artifact exceeds the configured in-memory verification limit",
                 ));
             }
-            let content = tokio::fs::read(&temporary.path).await.map_err(|error| {
+            file.seek(std::io::SeekFrom::Start(0))
+                .await
+                .map_err(|error| {
+                    PalaceError::new(
+                        PalaceErrorCode::StorageError,
+                        format!("failed to seek temporary artifact: {error}"),
+                    )
+                })?;
+            let mut content = Vec::with_capacity(size);
+            file.read_to_end(&mut content).await.map_err(|error| {
                 PalaceError::new(
                     PalaceErrorCode::StorageError,
                     format!("failed to read temporary artifact: {error}"),
@@ -478,20 +488,29 @@ async fn fetch_and_verify_package_artifact_file(
         }
     }
 
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to seek temporary artifact: {error}"),
+            )
+        })?;
+
     Ok(VerifiedArtifactFile {
-        path: temporary.path.clone(),
         content_type,
         size,
         hash,
+        file,
         temporary,
     })
 }
 #[cfg(feature = "reqwest")]
 struct VerifiedArtifactFile {
-    path: std::path::PathBuf,
     content_type: Option<String>,
     size: usize,
     hash: String,
+    file: tokio::fs::File,
     temporary: TemporaryArtifact,
 }
 
@@ -595,17 +614,9 @@ pub async fn fetch_and_verify_package_artifact_stream(
     config: &PalaceConfig,
 ) -> PalaceResult<(VerifiedArtifactStream, Option<String>, usize)> {
     let artifact = fetch_and_verify_package_artifact_file(url, trust, config).await?;
-    let file = tokio::fs::File::open(&artifact.path)
-        .await
-        .map_err(|error| {
-            PalaceError::new(
-                PalaceErrorCode::StorageError,
-                format!("failed to open verified artifact: {error}"),
-            )
-        })?;
     Ok((
         VerifiedArtifactStream {
-            inner: ReaderStream::new(file),
+            inner: ReaderStream::new(artifact.file),
             _temporary: artifact.temporary,
         },
         artifact.content_type,

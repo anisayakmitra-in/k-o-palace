@@ -57,6 +57,7 @@ pub struct SecurityConfig {
     pub rate_limit_download_per_minute: u32,
     pub rate_limit_review_per_minute: u32,
     pub rate_limit_auth_per_minute: u32,
+    pub rate_limit_resolve_per_minute: u32,
     pub token_hash_cost: u32,
     pub require_https_in_production: bool,
     pub max_body_bytes: usize,
@@ -85,7 +86,7 @@ impl Default for PalaceConfig {
                 body_limit_bytes: 16 * 1024 * 1024,
             },
             database: DatabaseConfig {
-                url: "postgres://kopalace:kopalace@localhost:5432/kopalace".into(),
+                url: String::new(),
                 max_connections: 10,
             },
             storage: StorageConfig {
@@ -103,6 +104,7 @@ impl Default for PalaceConfig {
                 rate_limit_download_per_minute: 240,
                 rate_limit_review_per_minute: 10,
                 rate_limit_auth_per_minute: 10,
+                rate_limit_resolve_per_minute: 60,
                 token_hash_cost: bcrypt::DEFAULT_COST,
                 require_https_in_production: true,
                 max_body_bytes: 16 * 1024 * 1024,
@@ -223,6 +225,11 @@ impl PalaceConfig {
                 cfg.security.rate_limit_auth_per_minute = value;
             }
         }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_RESOLVE_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_resolve_per_minute = value;
+            }
+        }
         if let Ok(value) = std::env::var("PALACE_ALLOW_PUBLIC_REGISTRATION") {
             cfg.security.allow_public_registration =
                 value == "1" || value.eq_ignore_ascii_case("true");
@@ -233,6 +240,10 @@ impl PalaceConfig {
         }
         if let Ok(seed) = std::env::var("PALACE_SEED_SAMPLES") {
             cfg.registry.seed_samples = seed == "1" || seed.eq_ignore_ascii_case("true");
+        }
+        if let Ok(value) = std::env::var("PALACE_REQUIRE_HTTPS") {
+            cfg.security.require_https_in_production =
+                value == "1" || value.eq_ignore_ascii_case("true");
         }
         cfg
     }

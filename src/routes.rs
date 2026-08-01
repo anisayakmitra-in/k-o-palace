@@ -25,7 +25,7 @@ use crate::{
 #[cfg(feature = "reqwest")]
 use axum::{
     body::Body,
-    http::{header, HeaderValue},
+    http::{header, HeaderName, HeaderValue},
 };
 use axum::{
     extract::{Path, Query, State},
@@ -208,9 +208,21 @@ async fn get_package(
 
 async fn resolve_package(
     State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
     Path(id): Path<String>,
     Query(params): Query<ResolveOptions>,
 ) -> PalaceResult<Json<ResolutionResponse>> {
+    let rl_key = rate_limit_key(
+        &headers,
+        "resolve",
+        state.config.security.trust_forwarded_headers,
+    );
+    if let Err(retry) = state.rate_limiters.resolve.check(&rl_key).await {
+        return Err(PalaceError::new(
+            PalaceErrorCode::RateLimited,
+            format!("rate limit exceeded, retry after {retry}s"),
+        ));
+    }
     const MAX_RESOLUTION_PACKAGES: usize = 50_000;
     let root = state.repo.get_package(&id).await?;
     if root.yanked {
@@ -422,6 +434,13 @@ async fn publish_package(
     pkg.trust.level = normalize_trust_level(Some(pkg.trust.level.as_str()));
     pkg.author = auth.publisher.name.clone();
     pkg.trust.publisher = auth.publisher.name.clone();
+    pkg.downloads = 0;
+    pkg.success_rate = 0.0;
+    pkg.yanked = false;
+    pkg.deprecated = None;
+    let now = Utc::now();
+    pkg.created_at = now;
+    pkg.updated_at = now;
 
     if pkg.artifact_url.is_some() && pkg.trust.content_hash.is_none() {
         return Err(PalaceError::new(
@@ -611,6 +630,14 @@ async fn download_package(
         response
             .headers_mut()
             .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        response.headers_mut().insert(
+            HeaderName::from_static("content-disposition"),
+            HeaderValue::from_static("attachment"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        );
         Ok(response)
     }
 }

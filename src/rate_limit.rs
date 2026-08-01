@@ -104,6 +104,7 @@ pub struct RateLimiters {
     pub download: RateLimiter,
     pub review: RateLimiter,
     pub auth: RateLimiter,
+    pub resolve: RateLimiter,
     pub read: RateLimiter,
 }
 
@@ -116,6 +117,7 @@ impl RateLimiters {
             download: RateLimiter::new(s.rate_limit_download_per_minute as usize),
             review: RateLimiter::new(s.rate_limit_review_per_minute as usize),
             auth: RateLimiter::new(s.rate_limit_auth_per_minute as usize),
+            resolve: RateLimiter::new(s.rate_limit_resolve_per_minute as usize),
             read: RateLimiter::new(600), // 10/sec default for anonymous reads
         }
     }

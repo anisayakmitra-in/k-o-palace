@@ -30,16 +30,16 @@ The current migrations and adapter persist package ownership and trust state, an
 
 - The publish route requires a declared digest, verifies fetched artifact bytes and any supplied signature, then transactionally persists the package, artifact metadata, signature metadata, and publication audit event.
 - `fetch_and_verify` is a library helper behind the optional `reqwest` feature and is called by the publish route before the transaction begins.
-- Artifact fetches enforce the configured size limit, validate every redirect destination, and verify the declared digest and signature. Published downloads proxy the exact verified bytes instead of redirecting clients to a mutable upstream URL. Signed artifacts also obey a separate in-memory verification limit.
+- Artifact fetches enforce the configured size limit, validate every redirect destination, and verify the declared digest and signature. Published downloads proxy the exact verified bytes instead of redirecting clients to a mutable upstream URL, retain the verified file handle while streaming, and send attachment and nosniff headers. Signed artifacts also obey a separate in-memory verification limit.
 - Both persistence backends reject an existing `(id, version)` as an immutable release. Package deletion now creates a durable yank and records an audit event; yanked packages cannot be downloaded.
-- The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog.
+- The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog. PostgreSQL startup requires DATABASE_URL, and non-localhost binds require an HTTPS PALACE_PUBLIC_URL unless PALACE_REQUIRE_HTTPS is explicitly disabled for a local proxy/test deployment.
 
 ### Access and social features
 
 - Public publisher registration is disabled by default and must be explicitly enabled with PALACE_ALLOW_PUBLIC_REGISTRATION=true. Publisher verification is moderator-gated and durable; enabled public registration still needs identity verification, invitations, and stronger anti-abuse controls.
 - Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes fail closed and must be reissued with explicit scopes; new tokens should request least privilege.
 
-- Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; a distributed deployment still needs a shared limiter.
+- Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; dependency resolution has its own bounded limiter; a distributed deployment still needs a shared limiter.
 - Reviews enforce one review per publisher and can be published or hidden by moderators. Edit/delete workflows and reputation calculation remain out of scope.
 - Discovery endpoints exist, but featured and trending use simple stored package fields. Download events are persisted and the same request context is counted once per hourly bucket; distributed fraud detection and cross-node analytics remain incomplete.
 - The standalone web/ client provides discovery, Pandora/Agent mode filtering, trust filters, and theme switching. User feeds, follows, media, notifications, and social publishing remain out of scope.

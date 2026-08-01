@@ -13,7 +13,7 @@ K-O Palace exposes a versioned HTTP API under /api/v1. Clients may depend on exi
 
 ## Authentication
 
-Write routes require Authorization: Bearer token. Tokens are scoped and may expire. Supported scopes are packages:read, packages:publish, packages:write, tokens:manage, moderation:write, and admin:write.
+Write routes require Authorization: Bearer token. Tokens are scoped and may expire. Supported scopes are packages:read, packages:publish, packages:write, tokens:manage, reviews:write, moderation:write, and admin:write.
 
 Public publisher registration is disabled by default. Operators may explicitly enable it with PALACE_ALLOW_PUBLIC_REGISTRATION=true; public deployments still need identity, invitation, and abuse controls. Review creation is rate-limited. Review moderation and publisher-verification decisions are audit-recorded.
 
@@ -24,8 +24,8 @@ Public publisher registration is disabled by default. Operators may explicitly e
 - GET /api/v1/packages/{id} - read the latest package version.
 - GET /api/v1/packages/{id}/versions - list package versions.
 - GET /api/v1/packages/{id}/versions/{version} - read an exact version.
-- GET /api/v1/packages/{id}/download - verify and stream the exact bytes of a non-yanked artifact through K-O Palace.
-- GET /api/v1/packages/{id}/resolve?runtime=&platform= - resolve required capabilities against non-yanked, compatible packages with a bounded graph walk. It never downloads or executes packages.
+- GET /api/v1/packages/{id}/download - verify and stream the exact bytes of a non-yanked artifact through K-O Palace with attachment and nosniff response headers.
+- GET /api/v1/packages/{id}/resolve?runtime=&platform= - resolve required capabilities against non-yanked, compatible packages with a bounded graph walk and dedicated rate limit. It never downloads or executes packages.
 - GET /api/v1/search - search packages with bounded query input.
 - GET /api/v1/publishers and GET /api/v1/publishers/{name} - read publisher profiles.
 - PATCH /api/v1/publishers/{name}/verification - set a publisher verification decision; requires moderator or administrator role and the corresponding scope.

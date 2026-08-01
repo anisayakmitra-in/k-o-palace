@@ -102,6 +102,7 @@ impl InMemoryRepository {
         let map = self.publishers.read().await;
         let mut publishers = map.values().cloned().collect::<Vec<_>>();
         publishers.sort_by(|left, right| left.name.cmp(&right.name));
+        publishers.truncate(10_000);
         Ok(publishers)
     }
 
@@ -209,6 +210,7 @@ impl InMemoryRepository {
         Ok(map
             .values()
             .filter(|t| t.publisher_id == publisher_id)
+            .take(1_000)
             .cloned()
             .collect())
     }
@@ -500,6 +502,7 @@ impl InMemoryRepository {
             .collect();
         cats.sort();
         cats.dedup();
+        cats.truncate(1_000);
         Ok(cats)
     }
 
@@ -512,6 +515,7 @@ impl InMemoryRepository {
             .collect();
         rts.sort();
         rts.dedup();
+        rts.truncate(1_000);
         Ok(rts)
     }
 
@@ -539,6 +543,7 @@ impl InMemoryRepository {
             .unwrap_or_default()
             .into_iter()
             .filter(|review| review.status == ReviewStatus::Published)
+            .take(100)
             .collect())
     }
 

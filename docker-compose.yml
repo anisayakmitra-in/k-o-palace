@@ -24,6 +24,7 @@ services:
       DATABASE_URL: postgres://kopalace:change-me@postgres:5432/kopalace
       PALACE_BIND: 0.0.0.0:3001
       PALACE_PUBLIC_URL: http://localhost:3001
+      PALACE_REQUIRE_HTTPS: "false"
       PALACE_CORS_ORIGINS: http://localhost:3001
       PALACE_DB_MAX_CONNECTIONS: "10"
     ports:
