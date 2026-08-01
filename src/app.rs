@@ -125,6 +125,8 @@ fn sample_packages() -> Vec<Package> {
 #[cfg(feature = "postgres")]
 impl AppState {
     pub async fn postgres(config: PalaceConfig) -> Result<Self, crate::error::PalaceError> {
+        let storage = ArtifactStorage::from_config(&config);
+        storage.ensure_supported()?;
         let repository = crate::repository::postgres::PostgresRepository::new_with_max_connections(
             &config.database.url,
             config.database.max_connections,
@@ -132,7 +134,7 @@ impl AppState {
         .await?;
         repository.migrate().await?;
         Ok(Self {
-            storage: ArtifactStorage::from_config(&config),
+            storage,
             rate_limiters: Arc::new(RateLimiters::from_config(&config)),
             config,
             repo: PackageRepository::Postgres(repository),

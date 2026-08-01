@@ -13,7 +13,7 @@ K-O Palace is a Rust registry API. Its default build uses PostgreSQL; the explic
 - Package metadata validation covers required fields, SemVer, HTTPS URLs, basic package IDs, kinds, trust metadata, compatibility, and capabilities.
 - The in-memory backend supports package versions, publisher lookup, package search, discovery lists, reviews, token management, trust-transition records, and yanking helpers.
 - The publisher directory returns public publisher profiles in a deterministic name order.
-- Artifact fetches enforce HTTPS, allowed hosts, safe resolved destinations, per-redirect validation, configured response limits, and optional SHA-256 verification. Ed25519 verification is available as a library helper.
+- Artifact fetches enforce HTTPS, allowed hosts, safe resolved destinations, per-redirect validation, configured response limits, and optional SHA-256 verification. Ed25519 verification is available as a library helper. The runtime rejects unimplemented storage backends instead of aliasing them to GitHub.
 - The PostgreSQL adapter persists publisher ownership, package trust metadata, verified artifact metadata, and audit events. Its database-backed integration test runs when `KOP_TEST_DATABASE_URL` is provided, including in CI.
 
 ## Runtime Boundary

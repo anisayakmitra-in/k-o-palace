@@ -36,7 +36,7 @@ pub struct StorageConfig {
     pub max_signed_artifact_size_bytes: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StorageBackend {
     #[default]
     Local,

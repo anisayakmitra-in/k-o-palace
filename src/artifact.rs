@@ -33,12 +33,7 @@ pub trait ArtifactStorageBackend: Send + Sync {
 pub enum ArtifactStorage {
     Local(LocalFileStorage),
     GitHub(GitHubReleaseStorage),
-    GitLab(GitHubReleaseStorage),
-    Codeberg(GitHubReleaseStorage),
-    Oci(GitHubReleaseStorage),
-    S3(GitHubReleaseStorage),
-    Azure(GitHubReleaseStorage),
-    Gcs(GitHubReleaseStorage),
+    Unsupported(StorageBackend),
 }
 
 impl ArtifactStorage {
@@ -47,13 +42,35 @@ impl ArtifactStorage {
         match config.storage.backend {
             StorageBackend::Local => ArtifactStorage::Local(LocalFileStorage),
             StorageBackend::GitHub => ArtifactStorage::GitHub(GitHubReleaseStorage),
-            StorageBackend::GitLab => ArtifactStorage::GitLab(GitHubReleaseStorage),
-            StorageBackend::Codeberg => ArtifactStorage::Codeberg(GitHubReleaseStorage),
-            StorageBackend::Oci => ArtifactStorage::Oci(GitHubReleaseStorage),
-            StorageBackend::S3 => ArtifactStorage::S3(GitHubReleaseStorage),
-            StorageBackend::Azure => ArtifactStorage::Azure(GitHubReleaseStorage),
-            StorageBackend::Gcs => ArtifactStorage::Gcs(GitHubReleaseStorage),
+            backend => ArtifactStorage::Unsupported(backend),
         }
+    }
+
+    /// Reject configured backends that do not have an implementation yet.
+    pub fn ensure_supported(&self) -> PalaceResult<()> {
+        if let Self::Unsupported(backend) = self {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotImplemented,
+                format!(
+                    "storage backend '{}' is not implemented; use local or github",
+                    backend_name(backend)
+                ),
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn backend_name(backend: &StorageBackend) -> &'static str {
+    match backend {
+        StorageBackend::Local => "local",
+        StorageBackend::GitHub => "github",
+        StorageBackend::GitLab => "gitlab",
+        StorageBackend::Codeberg => "codeberg",
+        StorageBackend::Oci => "oci",
+        StorageBackend::S3 => "s3",
+        StorageBackend::Azure => "azure",
+        StorageBackend::Gcs => "gcs",
     }
 }
 

@@ -1,14 +1,26 @@
 //! Artifact host validation and security tests.
 
 use k_o_palace::{
-    artifact::{validate_artifact_url, verify_artifact_content},
-    config::PalaceConfig,
+    artifact::{validate_artifact_url, verify_artifact_content, ArtifactStorage},
+    config::{PalaceConfig, StorageBackend},
     models::{TrustInfo, TrustLevel},
 };
 
 #[cfg(feature = "reqwest")]
 use k_o_palace::{artifact::fetch_and_verify_with_config, error::PalaceErrorCode};
 
+#[test]
+fn unsupported_storage_backend_is_not_mapped_to_github() {
+    let mut cfg = PalaceConfig::default();
+    cfg.storage.backend = StorageBackend::S3;
+    let storage = ArtifactStorage::from_config(&cfg);
+    let error = storage.ensure_supported().unwrap_err();
+    assert_eq!(
+        error.code,
+        k_o_palace::error::PalaceErrorCode::NotImplemented
+    );
+    assert!(error.message.contains("s3"));
+}
 fn config_with_hosts(hosts: Vec<String>) -> PalaceConfig {
     let mut cfg = PalaceConfig::default();
     cfg.storage.allowed_hosts = hosts;
