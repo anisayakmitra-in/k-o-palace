@@ -858,7 +858,7 @@ impl PostgresRepository {
         sqlx::query(
             "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
-        .bind(Uuid::now_v7())
+        .bind(transition.id)
         .bind(&transition.package_id)
         .bind(&transition.from_level)
         .bind(&transition.to_level)
@@ -915,11 +915,10 @@ impl PostgresRepository {
     }
 
     pub async fn record_audit_event(&self, event: &AuditEvent) -> PalaceResult<()> {
-        let id = uuid::Uuid::now_v7();
         sqlx::query(
             "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
         )
-        .bind(id)
+        .bind(event.id)
         .bind(&event.event_type)
         .bind(event.actor_id)
         .bind(event.package_id.as_ref().map(|_| "package"))
