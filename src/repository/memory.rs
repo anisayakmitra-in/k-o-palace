@@ -212,21 +212,12 @@ impl InMemoryRepository {
     }
 
     pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {
-        let mut map = self.packages.write().await;
-        let versions = map
-            .get_mut(&package.id)
-            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        if let Some(existing) = versions.iter_mut().find(|p| p.version == package.version) {
-            *existing = package.clone();
-            Ok(package.clone())
-        } else {
-            Err(PalaceError::new(
-                PalaceErrorCode::NotFound,
-                "version not found",
-            ))
-        }
+        let _ = package;
+        Err(PalaceError::new(
+            PalaceErrorCode::ImmutableVersion,
+            "published package versions cannot be updated",
+        ))
     }
-
     pub async fn delete_package(&self, id: &str, _publisher_id: Uuid) -> PalaceResult<()> {
         let mut map = self.packages.write().await;
         map.remove(id)

@@ -72,10 +72,8 @@ impl PalaceError {
             | PalaceErrorCode::HashMismatch
             | PalaceErrorCode::ArtifactNotAllowed
             | PalaceErrorCode::InsecureUrl => StatusCode::FORBIDDEN,
-            PalaceErrorCode::NotFound
-            | PalaceErrorCode::PackageYanked
-            | PalaceErrorCode::ImmutableVersion => StatusCode::NOT_FOUND,
-            PalaceErrorCode::Conflict => StatusCode::CONFLICT,
+            PalaceErrorCode::NotFound | PalaceErrorCode::PackageYanked => StatusCode::NOT_FOUND,
+            PalaceErrorCode::Conflict | PalaceErrorCode::ImmutableVersion => StatusCode::CONFLICT,
             PalaceErrorCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             PalaceErrorCode::NotImplemented => StatusCode::NOT_IMPLEMENTED,
             PalaceErrorCode::ServerError

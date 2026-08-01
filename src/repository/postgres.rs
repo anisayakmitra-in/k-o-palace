@@ -385,11 +385,10 @@ impl PostgresRepository {
         let caps_json = serde_json::to_value(&package.capabilities).unwrap_or_default();
         let compat_json = serde_json::to_value(&package.compatibility).unwrap_or_default();
 
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO packages (id, name, version, kind, description, author, license, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
-             ON CONFLICT (id, version) DO UPDATE SET
-                name = EXCLUDED.name, description = EXCLUDED.description, updated_at = NOW()"
+             ON CONFLICT (id, version) DO NOTHING"
         )
         .bind(&package.id)
         .bind(&package.name)
@@ -415,13 +414,23 @@ impl PostgresRepository {
         .await
         .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
 
+        if result.rows_affected() == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::ImmutableVersion,
+                "published package versions cannot be updated",
+            ));
+        }
+
         Ok(package.clone())
     }
 
     pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {
-        self.publish_package(package).await
+        let _ = package;
+        Err(PalaceError::new(
+            PalaceErrorCode::ImmutableVersion,
+            "published package versions cannot be updated",
+        ))
     }
-
     pub async fn delete_package(&self, id: &str, _publisher_id: Uuid) -> PalaceResult<()> {
         let result = sqlx::query("DELETE FROM packages WHERE id = $1")
             .bind(id)

@@ -219,3 +219,27 @@ async fn authenticated_publish_uses_the_authenticated_publisher_as_author() {
     assert_eq!(package.author, publisher.name);
     assert_eq!(package.trust.publisher, publisher.name);
 }
+
+#[tokio::test]
+async fn published_package_versions_cannot_be_updated() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let mut package = valid_pkg("immutable");
+    package.trust.publisher = publisher.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::put("/api/v1/packages/immutable")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}

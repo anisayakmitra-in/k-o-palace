@@ -31,7 +31,7 @@ The current migration and adapter pass the database-backed core-record integrati
 - The publish route validates package metadata but does not fetch the artifact, verify its supplied digest, verify its signature, or persist artifact metadata.
 - `fetch_and_verify` is a library helper behind the optional `reqwest` feature. It is not part of the publish transaction.
 - Artifact fetches buffer the response before enforcing the size limit. Redirect targets are not revalidated against the artifact-host policy.
-- Package immutability differs by backend: the memory backend rejects an existing `(id, version)`, while the PostgreSQL adapter updates it on conflict.
+- Both persistence backends reject an existing `(id, version)` as an immutable release.
 - The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog.
 
 ### Access and social features
