@@ -49,8 +49,9 @@ The client uses this environment variable:
 VITE_PALACE_API_URL=http://127.0.0.1:3001
 ```
 
-- If `VITE_PALACE_API_URL` is set, requests go to `<value>/api/v1/search`
-- If it is omitted, the client uses the current origin and calls `/api/v1/search`
+- Production builds accept only an explicit HTTPS API origin.
+- Local development may use HTTP only with `localhost`, `127.0.0.1`, or `::1`.
+- If the variable is omitted, the client uses the current origin and calls `/api/v1/search`.
 
 Copy `web/.env.example` to `web/.env` for local development if needed.
 

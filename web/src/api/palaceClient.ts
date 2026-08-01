@@ -7,6 +7,10 @@ export interface SearchPackagesInput {
   signal?: AbortSignal;
 }
 
+export interface PalaceClientOptions {
+  production?: boolean;
+}
+
 export class PalaceApiError extends Error {
   readonly status: number;
   readonly code?: string;
@@ -19,8 +23,38 @@ export class PalaceApiError extends Error {
   }
 }
 
-const normalizeBaseUrl = (baseUrl?: string): string =>
-  baseUrl ? baseUrl.replace(/\/+$/, "") : "";
+const localDevelopmentHosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+const normalizeBaseUrl = (baseUrl: string | undefined, production: boolean): string => {
+  if (!baseUrl) {
+    return "";
+  }
+
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    throw new Error("VITE_PALACE_API_URL must be an absolute HTTP or HTTPS URL");
+  }
+
+  if (url.protocol === "https:") {
+    return baseUrl.replace(/\/+$/, "");
+  }
+
+  if (url.protocol !== "http:") {
+    throw new Error("VITE_PALACE_API_URL must use HTTPS");
+  }
+
+  if (production) {
+    throw new Error("VITE_PALACE_API_URL must use HTTPS in production");
+  }
+
+  if (!localDevelopmentHosts.has(url.hostname)) {
+    throw new Error("HTTP is allowed only for local development");
+  }
+
+  return baseUrl.replace(/\/+$/, "");
+};
 
 const createPackageDownloadUrl = (baseUrl: string, packageId: string): string => {
   const encodedPackageId = encodeURIComponent(packageId);
@@ -41,8 +75,14 @@ const createSearchUrl = (baseUrl: string, query: SearchPackagesInput): string =>
   return `${baseUrl}/api/v1/search?${params.toString()}`;
 };
 
-export const createPalaceClient = (baseUrl = import.meta.env.VITE_PALACE_API_URL) => {
-  const normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+export const createPalaceClient = (
+  baseUrl = import.meta.env.VITE_PALACE_API_URL,
+  options: PalaceClientOptions = {},
+) => {
+  const normalizedBaseUrl = normalizeBaseUrl(
+    baseUrl,
+    options.production ?? import.meta.env.PROD,
+  );
 
   return {
     getPackageDownloadUrl(packageId: string): string {

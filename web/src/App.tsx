@@ -18,6 +18,7 @@ import {
   type DiscoveryMode,
   type SignatureFilter,
 } from "./lib/catalog";
+import { safeExternalUrl } from "./lib/urlSecurity";
 import type { Package } from "./types";
 
 type Theme = "light" | "dark";
@@ -77,6 +78,22 @@ function MetadataChips({
       ) : null}
     </>
   );
+}
+
+function ExternalLink({
+  href,
+  children,
+}: {
+  href: string | null;
+  children: string;
+}) {
+  const safeHref = safeExternalUrl(href);
+
+  return safeHref ? (
+    <a href={safeHref} target="_blank" rel="noopener noreferrer">
+      {children}
+    </a>
+  ) : null;
 }
 
 function App() {
@@ -442,16 +459,8 @@ function App() {
                     >
                       Inspect details
                     </button>
-                    {pkg.repository ? (
-                      <a href={pkg.repository} target="_blank" rel="noopener noreferrer">
-                        Repository
-                      </a>
-                    ) : null}
-                    {pkg.homepage ? (
-                      <a href={pkg.homepage} target="_blank" rel="noopener noreferrer">
-                        Homepage
-                      </a>
-                    ) : null}
+                    <ExternalLink href={pkg.repository}>Repository</ExternalLink>
+                    <ExternalLink href={pkg.homepage}>Homepage</ExternalLink>
                     {pkg.artifact_url ? (
                       <a
                         href={palaceClient.getPackageDownloadUrl(pkg.id)}
@@ -551,16 +560,8 @@ function App() {
             </div>
 
             <div className="card-actions">
-              {selectedPackage.repository ? (
-                <a href={selectedPackage.repository} target="_blank" rel="noopener noreferrer">
-                  Repository
-                </a>
-              ) : null}
-              {selectedPackage.homepage ? (
-                <a href={selectedPackage.homepage} target="_blank" rel="noopener noreferrer">
-                  Homepage
-                </a>
-              ) : null}
+              <ExternalLink href={selectedPackage.repository}>Repository</ExternalLink>
+              <ExternalLink href={selectedPackage.homepage}>Homepage</ExternalLink>
               {selectedPackage.artifact_url ? (
                 <a
                   href={palaceClient.getPackageDownloadUrl(selectedPackage.id)}

@@ -11,6 +11,9 @@ on:
         required: true
         type: string
 
+env:
+  RUST_TOOLCHAIN: 1.97.1
+
 permissions:
   contents: read
 
@@ -46,8 +49,11 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
+      - name: Verify release packaging helpers
+        run: bash scripts/test-release-packaging.sh
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
@@ -56,6 +62,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install web dependencies
         run: npm ci --prefix web
+      - name: Test web client
+        run: npm test --prefix web
       - name: Build web client
         run: npm run build --prefix web
       - name: Audit web dependencies
@@ -106,6 +114,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           targets: ${{ matrix.target }}
 
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
@@ -126,7 +135,7 @@ jobs:
           cp LICENSE README.md dist/stage/
           archive="dist/k-o-palace-${VERSION}-${TARGET}.tar.gz"
           tar -C dist/stage -czf "$archive" .
-          sha256sum "$archive" > "${archive}.sha256"
+          bash scripts/write-sha256-sidecar.sh "$archive"
 
       - name: Package Windows artifact
         if: runner.os == 'Windows'
@@ -161,6 +170,8 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
       - name: Generate SBOM
         env:

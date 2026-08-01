@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  RUST_TOOLCHAIN: 1.97.1
 
 permissions:
   contents: read
@@ -36,8 +37,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Verify release packaging helpers
+        run: bash scripts/test-release-packaging.sh
+
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
         with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
           components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
@@ -76,6 +81,8 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install web dependencies
         run: npm ci --prefix web
+      - name: Test web client
+        run: npm test --prefix web
       - name: Build web client
         run: npm run build --prefix web
       - name: Audit web dependencies
@@ -91,6 +98,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
 
@@ -127,6 +136,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
 
@@ -148,6 +159,8 @@ jobs:
           persist-credentials: false
 
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
 
       - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
 
