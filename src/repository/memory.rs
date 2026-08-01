@@ -401,11 +401,15 @@ impl InMemoryRepository {
         let versions = packages
             .get_mut(&transition.package_id)
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        let package = versions
-            .iter_mut()
-            .max_by_key(|p| p.version.clone())
-            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        package.trust.level = level;
+        if versions.is_empty() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        for package in versions {
+            package.trust.level = level.clone();
+        }
         let mut map = self.transitions.write().await;
         map.entry(transition.package_id.clone())
             .or_default()

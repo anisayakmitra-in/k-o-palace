@@ -119,3 +119,87 @@ async fn moderator_can_transition_trust() {
         TrustLevel::Verified
     );
 }
+
+#[tokio::test]
+async fn trust_transition_updates_all_versions_in_memory() {
+    use k_o_palace::models::Package;
+    use k_o_palace::repository::memory::InMemoryRepository;
+    use k_o_palace::repository::PackageRepository;
+
+    let repo = PackageRepository::Memory(InMemoryRepository::new());
+    let publisher = Publisher {
+        id: Uuid::new_v4(),
+        name: "mod".into(),
+        display_name: "Moderator".into(),
+        email: None,
+        website: None,
+        role: Role::Moderator,
+        created_at: Utc::now(),
+    };
+    repo.create_publisher(&publisher).await.unwrap();
+
+    let mut first = Package {
+        id: "versions.gene".into(),
+        name: "Versions".into(),
+        version: "1.0.0".into(),
+        kind: k_o_palace::models::PackageKind::Gene,
+        description: "test".into(),
+        author: "test".into(),
+        license: "MIT".into(),
+        trust: TrustInfo {
+            level: TrustLevel::Experimental,
+            signature: None,
+            public_key: None,
+            content_hash: None,
+            publisher: "test".into(),
+        },
+        capabilities: Default::default(),
+        downloads: 0,
+        success_rate: 0.0,
+        compatibility: Default::default(),
+        repository: None,
+        artifact_url: None,
+        homepage: None,
+        tags: vec![],
+        yanked: false,
+        provenance: None,
+        deprecated: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    repo.publish_package(&first).await.unwrap();
+    first.version = "2.0.0".into();
+    repo.publish_package(&first).await.unwrap();
+
+    let ctx = AuthContext {
+        publisher,
+        token_id: Uuid::new_v4(),
+        scopes: vec![],
+    };
+    transition_trust(
+        &repo,
+        &ctx,
+        "versions.gene",
+        TrustLevel::Verified,
+        Some("reviewed".into()),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        repo.get_package_version("versions.gene", "1.0.0")
+            .await
+            .unwrap()
+            .trust
+            .level,
+        TrustLevel::Verified
+    );
+    assert_eq!(
+        repo.get_package_version("versions.gene", "2.0.0")
+            .await
+            .unwrap()
+            .trust
+            .level,
+        TrustLevel::Verified
+    );
+}

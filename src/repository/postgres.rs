@@ -7,7 +7,7 @@ use crate::models::*;
 use crate::pagination::Pagination;
 use crate::repository::PackageFilters;
 use chrono::Utc;
-use sqlx::postgres::PgPool;
+use sqlx::postgres::{PgPool, PgPoolOptions};
 use uuid::Uuid;
 
 /// Helper struct for SQLx row mapping.
@@ -81,7 +81,13 @@ pub struct PostgresRepository {
 
 impl PostgresRepository {
     pub async fn new(url: &str) -> PalaceResult<Self> {
-        let pool = PgPool::connect(url)
+        Self::new_with_max_connections(url, 10).await
+    }
+
+    pub async fn new_with_max_connections(url: &str, max_connections: u32) -> PalaceResult<Self> {
+        let pool = PgPoolOptions::new()
+            .max_connections(max_connections.max(1))
+            .connect(url)
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         Ok(Self { pool })
