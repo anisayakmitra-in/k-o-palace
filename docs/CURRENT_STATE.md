@@ -30,7 +30,7 @@ The current migrations and adapter persist package ownership and trust state, an
 
 - The publish route requires a declared digest, verifies fetched artifact bytes and any supplied signature, then transactionally persists the package, artifact metadata, signature metadata, and publication audit event.
 - `fetch_and_verify` is a library helper behind the optional `reqwest` feature and is called by the publish route before the transaction begins.
-- Artifact fetches still buffer the response before enforcing the size limit; the implementation revalidates each redirect destination, but should move to bounded streaming for large artifacts.
+- Artifact fetches enforce the configured size limit while buffering the response; publish and download redirects re-fetch and verify the declared digest and signature. Large artifacts still need a bounded spool/streaming implementation.
 - Both persistence backends reject an existing `(id, version)` as an immutable release. Package deletion now creates a durable yank and records an audit event; yanked packages cannot be downloaded.
 - The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog.
 

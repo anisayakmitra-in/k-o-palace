@@ -440,8 +440,13 @@ async fn download_package(
         )
     })?;
 
-    // Validate the artifact URL is HTTPS and allowlisted
     crate::artifact::validate_artifact_url(&artifact_url, &state.config)?;
+    crate::artifact::fetch_and_verify_package_artifact(
+        &artifact_url,
+        &package.trust,
+        &state.config,
+    )
+    .await?;
 
     // Record download
     state.repo.record_download(&id, &package.version).await?;
