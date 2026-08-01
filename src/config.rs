@@ -64,6 +64,8 @@ pub struct SecurityConfig {
     pub request_timeout_secs: u64,
     pub trust_forwarded_headers: bool,
     pub allow_public_registration: bool,
+    pub behind_tls_proxy: bool,
+    pub replica_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +113,8 @@ impl Default for PalaceConfig {
                 request_timeout_secs: 30,
                 trust_forwarded_headers: false,
                 allow_public_registration: false,
+                behind_tls_proxy: false,
+                replica_count: 1,
             },
             registry: RegistryConfig {
                 seed_samples: false,
@@ -238,6 +242,16 @@ impl PalaceConfig {
             cfg.security.trust_forwarded_headers =
                 value == "1" || value.eq_ignore_ascii_case("true");
         }
+        if let Ok(value) = std::env::var("PALACE_BEHIND_TLS_PROXY") {
+            cfg.security.behind_tls_proxy = value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        if let Ok(value) = std::env::var("PALACE_REPLICA_COUNT") {
+            if let Ok(value) = value.parse::<usize>() {
+                if value > 0 {
+                    cfg.security.replica_count = value;
+                }
+            }
+        }
         if let Ok(seed) = std::env::var("PALACE_SEED_SAMPLES") {
             cfg.registry.seed_samples = seed == "1" || seed.eq_ignore_ascii_case("true");
         }
@@ -246,5 +260,31 @@ impl PalaceConfig {
                 value == "1" || value.eq_ignore_ascii_case("true");
         }
         cfg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PalaceConfig;
+
+    #[test]
+    fn startup_security_defaults_are_single_replica_without_tls_proxy() {
+        let config = PalaceConfig::default();
+
+        assert!(!config.security.behind_tls_proxy);
+        assert_eq!(config.security.replica_count, 1);
+    }
+
+    #[test]
+    fn startup_security_settings_are_loaded_from_environment() {
+        std::env::set_var("PALACE_BEHIND_TLS_PROXY", "true");
+        std::env::set_var("PALACE_REPLICA_COUNT", "3");
+
+        let config = PalaceConfig::from_env();
+
+        std::env::remove_var("PALACE_BEHIND_TLS_PROXY");
+        std::env::remove_var("PALACE_REPLICA_COUNT");
+        assert!(config.security.behind_tls_proxy);
+        assert_eq!(config.security.replica_count, 3);
     }
 }
