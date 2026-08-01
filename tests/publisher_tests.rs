@@ -6,8 +6,24 @@ use k_o_palace::{app::AppState, config::PalaceConfig, routes::router};
 use tower::ServiceExt;
 
 fn test_state() -> AppState {
-    let config = PalaceConfig::default();
+    let mut config = PalaceConfig::default();
+    config.security.allow_public_registration = true;
     AppState::in_memory(config)
+}
+
+#[tokio::test]
+async fn public_registration_is_disabled_by_default() {
+    let app = router(AppState::in_memory(PalaceConfig::default()));
+    let resp = app
+        .oneshot(
+            Request::post("/api/v1/publishers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"blocked","display_name":"Blocked"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 }
 
 #[tokio::test]
@@ -264,4 +280,226 @@ async fn rate_limit_publish() {
         }
     }
     assert_eq!(last_status, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn list_publishers_returns_registered_profiles_in_name_order() {
+    let state = test_state();
+    k_o_palace::auth::register_publisher(&state.repo, "zeta", "Zeta", None, None)
+        .await
+        .unwrap();
+    k_o_palace::auth::register_publisher(&state.repo, "alpha", "Alpha", None, None)
+        .await
+        .unwrap();
+
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/publishers")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let publishers: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(publishers[0]["name"], "alpha");
+    assert_eq!(publishers[1]["name"], "zeta");
+}
+
+#[tokio::test]
+async fn public_publisher_response_omits_registration_email() {
+    let state = test_state();
+    k_o_palace::auth::register_publisher(
+        &state.repo,
+        "privateorg",
+        "Private Org",
+        Some("owner@example.com".into()),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/publishers/privateorg")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let publisher: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(publisher.get("email").is_none());
+}
+
+#[tokio::test]
+async fn duplicate_authorization_headers_are_rejected() {
+    let state = test_state();
+    let (_, token) =
+        k_o_palace::auth::register_publisher(&state.repo, "dupeauth", "Dupe Auth", None, None)
+            .await
+            .unwrap();
+    let app = router(state);
+    let response = app
+        .oneshot(
+            Request::get("/api/v1/tokens")
+                .header("authorization", format!("Bearer {token}"))
+                .header("authorization", "Bearer invalid")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn token_id_without_secret_cannot_authenticate() {
+    let state = test_state();
+    let (publisher, _token) =
+        k_o_palace::auth::register_publisher(&state.repo, "opaqueid", "Opaque ID", None, None)
+            .await
+            .unwrap();
+    let token_id = state
+        .repo
+        .list_api_tokens(publisher.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .next()
+        .unwrap()
+        .id;
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/tokens")
+                .header("authorization", format!("Bearer kop_{}", token_id.simple()))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn read_only_token_cannot_manage_tokens() {
+    let state = test_state();
+    let (_publisher, owner_token) =
+        k_o_palace::auth::register_publisher(&state.repo, "readonly", "Read Only", None, None)
+            .await
+            .unwrap();
+
+    let response = router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/tokens")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {owner_token}"))
+                .body(Body::from(
+                    r#"{"name":"read-only","scopes":["packages:read"]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let read_only_token = json["token"].as_str().unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/tokens")
+                .header("authorization", format!("Bearer {read_only_token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn reserved_publisher_namespace_is_rejected() {
+    let response = router(test_state())
+        .oneshot(
+            Request::post("/api/v1/publishers")
+                .header("content-type", "application/json")
+                .body(Body::from(r#"{"name":"admin","display_name":"Reserved"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn oversized_registration_fields_are_rejected() {
+    let cases = [
+        serde_json::json!({"name": "longdisplay", "display_name": "x".repeat(129)}),
+        serde_json::json!({"name": "longemail", "display_name": "Long Email", "email": format!("{}@example.com", "x".repeat(244))}),
+        serde_json::json!({"name": "longwebsite", "display_name": "Long Website", "website": format!("https://example.com/{}", "x".repeat(2030))}),
+    ];
+
+    for body in cases {
+        let response = router(test_state())
+            .oneshot(
+                Request::post("/api/v1/publishers")
+                    .header("content-type", "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[tokio::test]
+async fn token_scope_count_is_bounded_before_delegation() {
+    let state = test_state();
+    let (_, token) = k_o_palace::auth::register_publisher(
+        &state.repo,
+        "scopebounds",
+        "Scope Bounds",
+        None,
+        None,
+    )
+    .await
+    .unwrap();
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/tokens")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "too-many",
+                        "scopes": vec!["packages:read"; 8],
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

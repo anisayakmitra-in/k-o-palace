@@ -2,17 +2,17 @@
 
 > Open AI Runtime Registry — the sovereign ecosystem for discovering, validating, signing, versioning, evolving, and distributing AI runtime components.
 
-K-O Palace is a runtime-agnostic AI package registry that implements the KUBER manifest specification. It provides secure package publishing, trust-level verification, Ed25519 signature validation, content-hash verification, and artifact storage with allowlist enforcement.
+K-O Palace is a runtime-agnostic AI package registry that implements the K-O Palace manifest specification. It provides secure package publishing, trust-level verification, Ed25519 signature validation, content-hash verification, and artifact storage with allowlist enforcement.
 
 ## Current Functionality
 
-- **Registry API** with 17 endpoints under `/api/v1`
-- **Manifest validation** for `kuber.toml` (package ID, semver, kind, author, license, compatibility, capabilities, URLs, trust metadata)
+- **Versioned registry API** under /api/v1 for packages, publishers, reviews, trust, search, and dependency resolution
+- **Manifest validation** for `palace.toml` (package ID, semver, kind, author, license, compatibility, capabilities, URLs, trust metadata)
 - **Authentication** with hashed API tokens, publisher ownership, and role-based access (publisher, maintainer, moderator, administrator)
-- **Trust levels** with explicit server-enforced transitions (Experimental → Community → Verified → Official → Enterprise → Certified)
+- **Trust levels** with explicit server-enforced transitions, backed by publisher verification for identified publishers
 - **Ed25519 signature verification** and SHA-256 content-hash verification
-- **Artifact storage** with local filesystem and GitHub Release backends, HTTPS enforcement, host allowlist, redirect limits, and checksum verification
-- **Pagination** with bounded limits and accurate total counts
+- **Artifact delivery** from local filesystem and GitHub Release sources, with HTTPS enforcement, host allowlists, bounded streaming to temporary files, redirect limits, and checksum verification
+- **Capability dependency resolution** with runtime/platform filtering, yanked-package exclusion, deterministic candidate ranking, a 1,000-candidate/1 MiB serialized catalog budget, and bounded graph traversal
 - **Search** with ranked relevance scoring
 - **Structured errors** with stable error codes
 - **CORS** configured from explicit origins (not permissive)
@@ -25,7 +25,7 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - PostgreSQL persistence with SQLx migrations (10 tables: publishers, api_tokens, packages, manifests, artifacts, signatures, reviews, trust_transitions, download_events, audit_events)
 - Token revocation and constant-time bcrypt comparison
 - Immutable audit events for all trust transitions and critical operations
-- Rate limiting for publish, search, download, and auth endpoints
+- Rate limiting for publish, search, download, review, and auth endpoints
 - HTTPS enforcement for artifact URLs in production
 - No client-self-assigned trust levels above Community
 - Secure defaults: localhost bind, configured CORS, body limits, timeouts
@@ -36,11 +36,32 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - S3 / Azure Blob / GCS storage adapters
 - GitLab and Codeberg release metadata backends
 - WebHOOK-based package update notifications
-- Semantic versioning constraint resolver for dependencies
+- Semantic version constraints and lockfiles for dependency resolution
 - Package signing key rotation workflow
 - Federated registry sync (mirror mode)
 - SBOM generation per package version
 - Search index (PostgreSQL full-text or Meilisearch)
+
+## Container Deployment
+
+For a local PostgreSQL-backed deployment:
+
+```bash
+docker compose up --build
+```
+
+The Compose deployment is intentionally local-only: it publishes `http://127.0.0.1:3001` and does not claim to terminate TLS. The application itself remains bound to loopback; a same-image relay makes that loopback listener reachable only through the host loopback port.
+
+Do not expose this Compose stack directly to a public network. Production deployments must provide secrets through the platform secret manager, terminate TLS at a trusted reverse proxy, set `PALACE_BEHIND_TLS_PROXY=true`, use an HTTPS `PALACE_PUBLIC_URL`, keep `PALACE_REPLICA_COUNT=1` while rate limiting is process-local, set explicit CORS origins, and configure PostgreSQL backups.
+## Web Client
+
+The standalone React and Vite client provides discovery and trust review without executing packages.
+
+    cd web
+    npm install
+    npm run dev
+
+Set VITE_PALACE_API_URL to point the client at a running Palace API. The web client is a discovery surface for Pandora-compatible packages and external-agent adapters; installation and execution remain explicit client actions.
 
 ## Local Development
 
@@ -48,25 +69,40 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 
 - Rust 1.75+ (`rustup`)
 - PostgreSQL 14+ (for production mode)
-- Node.js 18+ (only if modifying the frontend, if any)
+- Node.js 20.19+ and npm (for the web client)
 
-### Quick Start (In-Memory)
+### Quick Start (PostgreSQL)
 
 ```bash
-cargo run
+DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run
 ```
 
-The server binds to `127.0.0.1:3001` by default.
+The default build uses PostgreSQL and runs migrations at startup. The server binds to `127.0.0.1:3001` by default.
 
+For local API experiments without durable storage, use the explicit development build:
+
+```bash
+cargo run --no-default-features
+```
 ### Environment Variables
 
 | Variable | Default | Description |
 |---|---|---|
 | `PALACE_BIND` | `127.0.0.1:3001` | Server bind address |
 | `PALACE_PUBLIC_URL` | `http://127.0.0.1:3001` | Public URL for downloads |
-| `DATABASE_URL` | `postgres://...` | PostgreSQL connection string |
+| `DATABASE_URL` | required for PostgreSQL | PostgreSQL connection string; no credentialed default is used |
+| `PALACE_DB_MAX_CONNECTIONS` | `10` | PostgreSQL pool maximum |
 | `PALACE_CORS_ORIGINS` | (empty) | Comma-separated allowed origins |
 | `PALACE_SEED_SAMPLES` | `false` | Seed sample packages on startup |
+| `PALACE_RATE_LIMIT_PUBLISH_PER_MINUTE` | `10` | Publish requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_SEARCH_PER_MINUTE` | `120` | Search requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE` | `240` | Download requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Authentication and registration requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_RESOLVE_PER_MINUTE` | `60` | Dependency resolution requests per minute per limiter key |
+| `PALACE_TRUST_PROXY_HEADERS` | `false` | Trust a complete, valid `X-Forwarded-For` chain only when the direct peer is exactly allowlisted; select the nearest untrusted hop after skipping exact-IP trusted proxies, and fall back to the direct peer for malformed chains |
+| `PALACE_TRUSTED_PROXY_IPS` | (empty) | Comma-separated exact IP addresses of trusted direct proxy peers; hostnames and CIDR ranges are rejected |
+| `PALACE_BEHIND_TLS_PROXY` | `false` | Must be `true` when binding beyond loopback; the trusted reverse proxy must terminate TLS |
+| `PALACE_REPLICA_COUNT` | `1` | Must remain `1` while rate limiting is process-local |
 
 ## PostgreSQL Setup
 
@@ -76,7 +112,7 @@ psql kopalace -c "CREATE USER kopalace WITH PASSWORD 'kopalace';"
 psql kopalace -c "GRANT ALL ON DATABASE kopalace TO kopalace;"
 
 # Run migrations
-DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run --features postgres
+DATABASE_URL=postgres://kopalace:kopalace@localhost:5432/kopalace cargo run
 ```
 
 ### Migrations
@@ -145,7 +181,9 @@ Artifacts must be served over HTTPS from an allowlisted host. Default allowed ho
 - `github.com`
 - `objects.githubusercontent.com`
 
-Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable.
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND` (`local` or `github`; other values fail startup), `PALACE_ALLOW_PUBLIC_REGISTRATION` (disabled by default), `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, `PALACE_TRUST_PROXY_HEADERS`, and `PALACE_TRUSTED_PROXY_IPS`. Anonymous rate-limit and download-dedupe keys use the direct peer IP unless proxy-header trust is enabled and that peer is in the exact-IP allowlist. The complete `X-Forwarded-For` chain must parse as non-empty IP elements; the nearest untrusted hop is selected from right to left after skipping exact-IP trusted proxies, while any malformed chain falls back to the direct peer.
+
+API tokens can request `packages:read`, `packages:publish`, `packages:write`, `tokens:manage`, `moderation:write`, or `admin:write` scopes and may include an `expires_at` timestamp. New tokens are addressable by their token ID; older tokens continue through the compatibility verifier.
 
 ## Trust Review
 
@@ -162,10 +200,14 @@ DATABASE_URL=postgres://user:pass@localhost:5432/kopalace \
   ./target/release/k-o-palace
 ```
 
-For public deployment, set:
+For public deployment, place K-O Palace behind a trusted TLS-terminating reverse proxy and set:
 - `PALACE_BIND=0.0.0.0:3001`
 - `PALACE_PUBLIC_URL=https://registry.example.com`
 - `PALACE_CORS_ORIGINS=https://app.example.com`
+- `PALACE_BEHIND_TLS_PROXY=true`
+- `PALACE_REPLICA_COUNT=1`
+
+A non-loopback bind always requires both `PALACE_BEHIND_TLS_PROXY=true` and an HTTPS public URL; there is no HTTP opt-out for that startup check.
 
 ## Pandora CLI Integration
 
@@ -193,10 +235,10 @@ All endpoints are versioned under `/api/v1`. Breaking changes require a new API 
 
 - **Authentication**: Bearer token (bcrypt-hashed at rest)
 - **Authorization**: Role-based (publisher, maintainer, moderator, administrator)
-- **Trust levels**: Server-enforced transitions, no client self-assignment above Community
+- **Trust levels** with explicit server-enforced transitions, backed by publisher verification for identified publishers
 - **Signatures**: Ed25519 verified server-side
 - **Content hash**: SHA-256 verified against uploaded artifact
-- **Artifacts**: HTTPS-only, host allowlisted, redirect-limited, size-limited, content-type validated
+- **Artifacts**: HTTPS-only, host allowlisted, redirect-limited, size-limited, content-type validated, streamed as attachments with nosniff
 - **CORS**: Configured origins only, never permissive
 - **Rate limits**: Publish (10/min), Search (120/min), Download (240/min), Auth (10/min)
 - **Request limits**: 16 MB body, 30 second timeout

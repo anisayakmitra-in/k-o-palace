@@ -18,8 +18,10 @@ CREATE TABLE IF NOT EXISTS api_tokens (
     publisher_id UUID NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
     token_hash   VARCHAR(128) NOT NULL,
     description  VARCHAR(256),
+    name         VARCHAR(256) NOT NULL,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     revoked_at   TIMESTAMPTZ,
+    expires_at   TIMESTAMPTZ,
     last_used_at TIMESTAMPTZ
 );
 CREATE INDEX IF NOT EXISTS idx_api_tokens_publisher ON api_tokens(publisher_id);
@@ -40,6 +42,7 @@ CREATE TABLE IF NOT EXISTS packages (
     tags         JSONB NOT NULL DEFAULT '[]',
     capabilities JSONB NOT NULL DEFAULT '{}',
     compatibility JSONB NOT NULL DEFAULT '{}',
+    provenance   JSONB,
     downloads    BIGINT NOT NULL DEFAULT 0,
     success_rate REAL NOT NULL DEFAULT 0.0,
     created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -90,8 +93,7 @@ CREATE TABLE IF NOT EXISTS reviews (
     publisher_id UUID NOT NULL REFERENCES publishers(id) ON DELETE CASCADE,
     rating       INTEGER NOT NULL CHECK (rating >= 1 AND rating <= 5),
     comment      TEXT NOT NULL DEFAULT '',
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_reviews_package ON reviews(package_id);
 
@@ -102,8 +104,7 @@ CREATE TABLE IF NOT EXISTS trust_transitions (
     to_level     VARCHAR(32) NOT NULL,
     approved_by  UUID REFERENCES publishers(id),
     reason       TEXT,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    FOREIGN KEY (package_id) REFERENCES packages(id) ON DELETE CASCADE
+    created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_trust_package ON trust_transitions(package_id);
 

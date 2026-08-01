@@ -3,8 +3,8 @@
 use crate::{
     error::{PalaceError, PalaceErrorCode, PalaceResult},
     models::{
-        CapabilityInfo, CompatibilityInfo, KuberManifest, ManifestTrust, Package, PackageKind,
-        TrustLevel,
+        CapabilityInfo, CompatibilityInfo, ManifestTrust, Package, PackageKind, PalaceManifest,
+        TrustInfo, TrustLevel,
     },
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -13,8 +13,17 @@ use semver::Version;
 use std::collections::HashSet;
 use url::Url;
 
-/// Validate a `kuber.toml` manifest against the documented specification.
-pub fn validate_manifest(manifest: &KuberManifest) -> PalaceResult<()> {
+const MAX_CAPABILITY_ENTRIES: usize = 128;
+const MAX_CAPABILITY_LENGTH: usize = 256;
+const MAX_COMPATIBILITY_ENTRIES: usize = 64;
+const MAX_COMPATIBILITY_LENGTH: usize = 128;
+const MAX_TAGS: usize = 50;
+const MAX_TAG_LENGTH: usize = 32;
+const MAX_EXAMPLES: usize = 50;
+const MAX_EXAMPLE_LENGTH: usize = 4096;
+
+/// Validate a `palace.toml` manifest against the documented specification.
+pub fn validate_manifest(manifest: &PalaceManifest) -> PalaceResult<()> {
     let mut errors = Vec::new();
 
     validate_package_id(&manifest.package.id, &mut errors);
@@ -57,6 +66,8 @@ pub fn validate_package(pkg: &Package) -> PalaceResult<()> {
     validate_non_empty(&pkg.license, "license", &mut errors);
     validate_capabilities(&pkg.capabilities, &mut errors);
     validate_compatibility(&pkg.compatibility, &mut errors);
+    validate_tags(&pkg.tags, "tags", &mut errors);
+    validate_package_trust(&pkg.trust, &mut errors);
     if let Some(url) = &pkg.repository {
         if !is_valid_https_url(url) {
             errors.push(("repository", format!("invalid HTTPS URL: {url}")));
@@ -126,44 +137,72 @@ fn validate_non_empty(value: &str, field: &'static str, errors: &mut Vec<(&'stat
 }
 
 fn validate_capabilities(cap: &CapabilityInfo, errors: &mut Vec<(&'static str, String)>) {
-    for (i, c) in cap.provides.iter().enumerate() {
-        if c.trim().is_empty() {
-            errors.push((
-                "capabilities.provides",
-                format!("empty capability at index {i}"),
-            ));
-        }
-    }
-    for (i, c) in cap.requires.iter().enumerate() {
-        if c.trim().is_empty() {
-            errors.push((
-                "capabilities.requires",
-                format!("empty capability at index {i}"),
-            ));
-        }
-    }
+    validate_string_list(
+        &cap.provides,
+        "capabilities.provides",
+        MAX_CAPABILITY_ENTRIES,
+        MAX_CAPABILITY_LENGTH,
+        "capability",
+        errors,
+    );
+    validate_string_list(
+        &cap.requires,
+        "capabilities.requires",
+        MAX_CAPABILITY_ENTRIES,
+        MAX_CAPABILITY_LENGTH,
+        "capability",
+        errors,
+    );
 }
 
 fn validate_compatibility(comp: &CompatibilityInfo, errors: &mut Vec<(&'static str, String)>) {
-    for (i, r) in comp.runtimes.iter().enumerate() {
-        if r.trim().is_empty() {
-            errors.push((
-                "compatibility.runtimes",
-                format!("empty runtime at index {i}"),
-            ));
-        }
+    validate_string_list(
+        &comp.runtimes,
+        "compatibility.runtimes",
+        MAX_COMPATIBILITY_ENTRIES,
+        MAX_COMPATIBILITY_LENGTH,
+        "runtime",
+        errors,
+    );
+    validate_string_list(
+        &comp.platforms,
+        "compatibility.platforms",
+        MAX_COMPATIBILITY_ENTRIES,
+        MAX_COMPATIBILITY_LENGTH,
+        "platform",
+        errors,
+    );
+}
+
+fn validate_tags(tags: &[String], field: &'static str, errors: &mut Vec<(&'static str, String)>) {
+    validate_string_list(tags, field, MAX_TAGS, MAX_TAG_LENGTH, "tag", errors);
+}
+
+fn validate_string_list(
+    values: &[String],
+    field: &'static str,
+    max_entries: usize,
+    max_length: usize,
+    label: &str,
+    errors: &mut Vec<(&'static str, String)>,
+) {
+    if values.len() > max_entries {
+        errors.push((field, format!("too many {label}s (max {max_entries})")));
     }
-    for (i, p) in comp.platforms.iter().enumerate() {
-        if p.trim().is_empty() {
+    for (index, value) in values.iter().enumerate() {
+        if value.trim().is_empty() {
+            errors.push((field, format!("empty {label} at index {index}")));
+        }
+        if value.len() > max_length {
             errors.push((
-                "compatibility.platforms",
-                format!("empty platform at index {i}"),
+                field,
+                format!("{label} at index {index} exceeds {max_length} characters"),
             ));
         }
     }
 }
 
-fn validate_urls(manifest: &KuberManifest, errors: &mut Vec<(&'static str, String)>) {
+fn validate_urls(manifest: &PalaceManifest, errors: &mut Vec<(&'static str, String)>) {
     if let Some(url) = &manifest.package.homepage {
         if !is_valid_https_url(url) {
             errors.push(("package.homepage", format!("invalid HTTPS URL: {url}")));
@@ -212,22 +251,61 @@ fn validate_trust_metadata(trust: &ManifestTrust, errors: &mut Vec<(&'static str
     }
 }
 
+fn validate_package_trust(trust: &TrustInfo, errors: &mut Vec<(&'static str, String)>) {
+    match (&trust.signature, &trust.public_key) {
+        (Some(_), None) | (None, Some(_)) => errors.push((
+            "trust.signature",
+            "signature and public_key must be provided together".into(),
+        )),
+        (Some(signature), Some(public_key)) => {
+            if BASE64.decode(signature).is_err() {
+                errors.push(("trust.signature", "signature must be valid base64".into()));
+            }
+            if BASE64.decode(public_key).is_err() {
+                errors.push(("trust.public_key", "public_key must be valid base64".into()));
+            }
+        }
+        (None, None) => {}
+    }
+
+    if let Some(content_hash) = &trust.content_hash {
+        let digest = content_hash.strip_prefix("sha256:");
+        if !matches!(digest, Some(value) if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            errors.push((
+                "trust.content_hash",
+                "content_hash must be a sha256: digest with 64 hexadecimal characters".into(),
+            ));
+        }
+    }
+}
 fn validate_metadata(
     meta: &crate::models::ManifestMetadata,
     errors: &mut Vec<(&'static str, String)>,
 ) {
-    if meta.tags.len() > 50 {
-        errors.push(("metadata.tags", "too many tags (max 50)".into()));
-    }
-    for (i, t) in meta.tags.iter().enumerate() {
-        if t.len() > 32 {
-            errors.push(("metadata.tags", format!("tag at index {i} too long")));
-        }
+    validate_tags(&meta.tags, "metadata.tags", errors);
+    validate_string_list(
+        &meta.examples,
+        "metadata.examples",
+        MAX_EXAMPLES,
+        MAX_EXAMPLE_LENGTH,
+        "example",
+        errors,
+    );
+    if meta
+        .documentation
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_EXAMPLE_LENGTH)
+    {
+        errors.push((
+            "metadata.documentation",
+            format!("documentation exceeds {MAX_EXAMPLE_LENGTH} characters"),
+        ));
     }
 }
 
 fn reject_unknown_security_fields(
-    manifest: &KuberManifest,
+    manifest: &PalaceManifest,
     errors: &mut Vec<(&'static str, String)>,
 ) {
     // Known top-level keys. Reject anything else at the top level as a security-critical guard.

@@ -1,0 +1,51 @@
+services:
+  postgres:
+    image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: kopalace
+      POSTGRES_USER: kopalace
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kopalace -d kopalace"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  palace:
+    image: k-o-palace:local
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://kopalace:change-me@postgres:5432/kopalace
+      PALACE_BIND: 127.0.0.1:3001
+      PALACE_PUBLIC_URL: http://127.0.0.1:3001
+      PALACE_CORS_ORIGINS: http://127.0.0.1:3001
+      PALACE_DB_MAX_CONNECTIONS: "10"
+      PALACE_TRUST_PROXY_HEADERS: "false"
+      PALACE_TRUSTED_PROXY_IPS: ""
+      PALACE_BEHIND_TLS_PROXY: "false"
+      PALACE_REPLICA_COUNT: "1"
+    ports:
+      - "127.0.0.1:3001:3000"
+
+  loopback-relay:
+    image: k-o-palace:local
+    build: .
+    restart: unless-stopped
+    depends_on:
+      palace:
+        condition: service_healthy
+    network_mode: service:palace
+    entrypoint:
+      - socat
+      - TCP-LISTEN:3000,fork,reuseaddr
+      - TCP:127.0.0.1:3001
+
+volumes:
+  postgres-data:

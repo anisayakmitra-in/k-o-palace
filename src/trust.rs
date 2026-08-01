@@ -97,13 +97,46 @@ pub fn can_transition(from: TrustLevel, to: TrustLevel) -> bool {
         .unwrap_or(false)
 }
 
-/// Apply a trust transition, enforcing authorization and recording audit.
+/// Apply a trust transition with the default library policy.
 pub async fn transition_trust(
     repo: &crate::repository::PackageRepository,
     actor: &AuthContext,
     package_id: &str,
     new_level: TrustLevel,
     reason: Option<String>,
+) -> PalaceResult<TrustTransition> {
+    transition_trust_inner(repo, actor, package_id, new_level, reason, false, false).await
+}
+
+/// Apply a trust transition with an explicit signature policy.
+pub async fn transition_trust_with_policy(
+    repo: &crate::repository::PackageRepository,
+    actor: &AuthContext,
+    package_id: &str,
+    new_level: TrustLevel,
+    reason: Option<String>,
+    require_signatures: bool,
+) -> PalaceResult<TrustTransition> {
+    transition_trust_inner(
+        repo,
+        actor,
+        package_id,
+        new_level,
+        reason,
+        require_signatures,
+        true,
+    )
+    .await
+}
+
+async fn transition_trust_inner(
+    repo: &crate::repository::PackageRepository,
+    actor: &AuthContext,
+    package_id: &str,
+    new_level: TrustLevel,
+    reason: Option<String>,
+    require_signatures: bool,
+    require_publisher_identity: bool,
 ) -> PalaceResult<TrustTransition> {
     if !actor.can_moderate() && !actor.can_administer() {
         return Err(PalaceError::new(
@@ -123,6 +156,36 @@ pub async fn transition_trust(
     let package = repo.get_package(package_id).await?;
     let current = package.trust.level;
 
+    if new_level.is_server_assigned() {
+        if let Some(publisher_id) = repo.get_package_publisher_id(package_id).await? {
+            let verification = repo.get_publisher_verification(publisher_id).await?;
+            if !verification.verified {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::TrustTransitionDenied,
+                    "publisher verification is required for server-assigned trust levels",
+                ));
+            }
+        } else if require_publisher_identity {
+            return Err(PalaceError::new(
+                PalaceErrorCode::TrustTransitionDenied,
+                "publisher identity is required for server-assigned trust levels",
+            ));
+        }
+        if !repo
+            .has_verified_artifacts_for_all_versions(package_id, require_signatures)
+            .await?
+        {
+            let message = if require_signatures {
+                "server-recorded artifact and signature verification evidence is required for every package version"
+            } else {
+                "server-recorded artifact verification evidence is required for every package version"
+            };
+            return Err(PalaceError::new(
+                PalaceErrorCode::TrustTransitionDenied,
+                message,
+            ));
+        }
+    }
     if !can_transition(current.clone(), new_level.clone()) {
         return Err(PalaceError::new(
             PalaceErrorCode::TrustTransitionDenied,

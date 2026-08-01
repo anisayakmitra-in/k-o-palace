@@ -4,6 +4,7 @@ use crate::error::{PalaceError, PalaceErrorCode};
 
 pub const DEFAULT_LIMIT: usize = 50;
 pub const MAX_LIMIT: usize = 250;
+pub const MAX_OFFSET: usize = 1_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Pagination {
@@ -25,12 +26,18 @@ impl Pagination {
                 format!("limit must be <= {MAX_LIMIT}"),
             ));
         }
+        if offset > MAX_OFFSET {
+            return Err(PalaceError::new(
+                PalaceErrorCode::BadRequest,
+                format!("offset must be <= {MAX_OFFSET}"),
+            ));
+        }
         Ok(Self { limit, offset })
     }
 
     pub fn bounds(&self, total: usize) -> (usize, usize) {
         let start = self.offset.min(total);
-        let end = (self.offset + self.limit).min(total);
+        let end = self.offset.saturating_add(self.limit).min(total);
         (start, end)
     }
 }

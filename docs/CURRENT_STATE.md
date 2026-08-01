@@ -1,198 +1,76 @@
-# K-O Palace — Current State Audit
+# K-O Palace: Current State
 
-**Audited at:** 2026-07-31  
-**HEAD:** `3fd681f`  
-**Branch:** `main`
+**Reviewed:** 2026-08-01
+**Reviewed branch:** `codex/k-o-postgres-parity`
 
----
+K-O Palace is a Rust registry API. Its default build uses PostgreSQL; the explicit `--no-default-features` build uses an in-memory backend for tests and local development. It is not ready to operate as a public marketplace yet.
 
-## What Actually Works
+## Works Today
 
-### Core Registry API (17 endpoints)
-- `GET /health` — process alive check ✅
-- `GET /ready` — same as health (does NOT check DB) ⚠️
-- `GET /version` — server version ✅
-- `GET /api/v1/packages` — list with pagination ✅
-- `POST /api/v1/packages` — publish (auth required) ✅
-- `GET /api/v1/packages/{id}` — get latest version ✅
-- `PUT /api/v1/packages/{id}` — update (auth + owner) ✅
-- `DELETE /api/v1/packages/{id}` — delete (auth + owner/moderator) ✅
-- `GET /api/v1/packages/{id}/versions` — list versions ✅
-- `GET /api/v1/packages/{id}/versions/{version}` — get specific version ✅
-- `GET /api/v1/packages/{id}/download` — redirect to artifact URL ✅
-- `GET /api/v1/packages/{id}/reviews` — list reviews ✅
-- `POST /api/v1/packages/{id}/reviews` — add review (auth required) ✅
-- `GET /api/v1/search` — ILIKE search ✅
-- `GET /api/v1/categories` — derived from tags ✅
-- `GET /api/v1/featured` — by success_rate + downloads ✅
-- `GET /api/v1/trending` — by downloads ✅
-- `GET /api/v1/newest` — by created_at ✅
-- `GET /api/v1/runtimes` — derived from compatibility ✅
+- Versioned HTTP endpoints for packages, publishers, tokens, reviews, search, discovery lists, health, readiness, and version information.
+- Publisher registration returns a bearer token once. Tokens are bcrypt-hashed and can be revoked through the HTTP API.
+- Publishing, updating, deleting, and reviewing require bearer authentication. The API checks publisher ownership before package mutation.
+- Package metadata validation covers required fields, SemVer, HTTPS URLs, basic package IDs, kinds, trust metadata, compatibility, and capabilities.
+- The in-memory backend supports package versions, publisher lookup, package search, discovery lists, reviews, token management, trust-transition records, and yanking helpers.
+- The publisher directory returns public publisher profiles in a deterministic name order. Moderator and administrator decisions are stored in a durable publisher-verification record and audit log.
+- Artifact fetches enforce HTTPS, allowed hosts, safe resolved destinations, per-redirect validation, configured response limits, and optional SHA-256 verification. Ed25519 verification is available as a library helper. The runtime rejects unimplemented storage backends instead of aliasing them to GitHub.
+- The PostgreSQL adapter persists publisher ownership, publisher verification, package trust metadata, verified artifact metadata, and audit events.
 
-### Authentication
-- Bearer token auth on publish/update/delete/review ✅
-- bcrypt-hashed tokens at rest ✅
-- Token revocation (library function, NO HTTP endpoint) ⚠️
-- Publisher registration (library function, NO HTTP endpoint) ⚠️
-- Role-based access (4 roles: publisher, maintainer, moderator, admin) ✅
-- Publisher ownership checks ✅
+## Runtime Boundary
 
-### Trust System
-- 6 trust levels (Experimental → Community → Verified → Official → Enterprise → Certified) ✅
-- Server-enforced transitions (clients cannot self-assign above Community) ✅
-- Trust transition recording with approver ✅
-- Ed25519 signature verification (library function) ✅
-- SHA-256 content hash verification (library function) ✅
+The default feature set selects `AppState::postgres`, runs SQLx migrations, and fails startup if the configured database is unavailable. The in-memory backend is selected only with `--no-default-features`.
 
-### Validation
-- Package ID format validation ✅
-- SemVer validation (basic regex, NOT full SemVer crate) ⚠️
-- Package kind validation ✅
-- URL HTTPS validation ✅
-- Trust metadata validation ✅
-- Unknown security-critical field rejection ✅
+## Known Gaps
 
-### Artifact Security
-- HTTPS enforcement for artifact URLs ✅
-- Host allowlist validation ✅
-- Default allowlist (github.com, objects.githubusercontent.com) ✅
-- Content-type validation ✅
-- Max artifact size (100 MB) ✅
-- Redirect limit enforcement (reqwest feature) ✅
-- SHA-256 content hash computation ✅
+### PostgreSQL parity
 
-### Pagination
-- Bounded limits (max 250) ✅
-- Offset-based pagination ✅
-- Accurate total count ✅
+The current migrations and adapter persist package ownership and trust state, and the database-backed integration test covers those fields plus yanking. Broader parity coverage remains incomplete: concurrent publish, review, download, and trust-transition behavior is not covered.
 
-### Error Model
-- 15 stable error codes ✅
-- Structured JSON error responses ✅
-- HTTP status mapping ✅
+### Publication and artifacts
 
-### Security Defaults
-- Localhost bind (127.0.0.1:3001) ✅
-- CORS from configured origins ✅
-- Request body limits (16 MB) ✅
-- Request timeouts (30s) ✅
-- Structured tracing ✅
-- No token logging (redact_token) ✅
-- No unwrap() in startup ✅
+- The publish route requires a declared digest, verifies fetched artifact bytes and any supplied signature, then transactionally persists the package, artifact metadata, signature metadata, and publication audit event.
+- `fetch_and_verify` is a library helper behind the optional `reqwest` feature and is called by the publish route before the transaction begins.
+- Artifact fetches enforce the configured size limit, validate every redirect destination, and verify the declared digest and signature. Published downloads proxy the exact verified bytes instead of redirecting clients to a mutable upstream URL, retain the verified file handle while streaming, and send attachment and nosniff headers. Signed artifacts also obey a separate in-memory verification limit.
+- Both persistence backends reject an existing `(id, version)` as an immutable release. Package deletion now creates a durable yank and records an audit event; yanked packages cannot be downloaded.
+- The process can seed hardcoded sample packages when configured. A public registry should not rely on a bundled catalog. PostgreSQL startup requires `DATABASE_URL`. The local Compose deployment keeps the application and published host port on loopback without TLS. A non-loopback bind always requires `PALACE_BEHIND_TLS_PROXY=true` and an HTTPS `PALACE_PUBLIC_URL`; there is no HTTP opt-out. `PALACE_REPLICA_COUNT` must remain `1` while rate limiting is process-local.
 
-### In-Memory Backend
-- Full repository implementation (28 methods) ✅
-- All tests pass against in-memory ✅
-- Suitable for tests and local dev ✅
+### Access and social features
 
-### PostgreSQL Backend
-- Compiles cleanly with `--features postgres` ✅
-- 10-table schema with 13 indexes ✅
-- pgcrypto extension for gen_random_uuid() ✅
-- NOT integration-tested ⚠️
-- Migration CI fails (non-blocking) ⚠️
+- Public publisher registration is disabled by default and must be explicitly enabled with PALACE_ALLOW_PUBLIC_REGISTRATION=true. Publisher verification is moderator-gated and durable; enabled public registration still needs identity verification, invitations, and stronger anti-abuse controls.
+- Tokens support explicit scopes, expiry input, UUID lookup, revocation, and last-used persistence. Legacy tokens without scopes fail closed and must be reissued with explicit scopes; new tokens should request least privilege.
 
-### CI Pipeline
-- fmt + check + clippy + test: ✅ green
-- Build release: ✅ green (2.03 MB artifact)
-- Migration verify: ❌ failure (continue-on-error)
-- SBOM generation: ❌ failure (continue-on-error)
+- Authenticated rate limits use a one-way token key. Anonymous traffic shares a bucket unless a deployment explicitly enables trusted forwarded headers; dependency resolution has its own bounded limiter; a distributed deployment still needs a shared limiter.
+- Reviews enforce one review per publisher and can be published or hidden by moderators. Edit/delete workflows and reputation calculation remain out of scope.
+- Discovery endpoints exist, but featured and trending use simple stored package fields. Download events are persisted and the same request context is counted once per hourly bucket; distributed fraud detection and cross-node analytics remain incomplete.
+- The standalone web/ client provides discovery, Pandora/Agent mode filtering, trust filters, and theme switching. User feeds, follows, media, notifications, and social publishing remain out of scope.
 
-### Tests (30 passing)
-- 5 API integration tests ✅
-- 6 artifact host validation tests ✅
-- 7 auth/authorization tests ✅
-- 6 trust/signature tests ✅
-- 6 validation tests ✅
+### Registry ecosystem
 
----
+- Capability dependency resolution is available through GET /api/v1/packages/{id}/resolve with runtime/platform filters, yanked exclusion, deterministic ranking, cycle protection, and a bounded graph walk. Version constraints, lockfiles, compatibility decisions beyond the current filters, runtime adapters, source-forge provenance, and package transfer/tombstone policy remain incomplete.
+- Package ownership checks fail closed for legacy rows without a durable publisher ID; the ownership backfill requires operator review because historical `author` text is not a canonical identity source.
+- `docs/API_CONTRACT.md` publishes the current route, authentication, error, and deployment contract. A machine-generated OpenAPI document is still a follow-up.
 
-## What Is Scaffolded (type exists, not fully wired)
+## Verified Commands
 
-| Area | Status |
-|------|--------|
-| `VersionInfo` | Struct exists, `list_versions` works, but no dependency metadata |
-| `Manifest` / `KuberManifest` | Parsed and validated, but not stored separately |
-| `AuditEvent` | Struct exists, `record_audit_event` in repo, but NOT called from routes |
-| `TrustTransition` | Struct exists, `record_trust_transition` in repo, `transition_trust` works, but NO HTTP endpoint |
-| `ArtifactInfo` | Struct exists, `fetch_and_verify` exists, but NOT called from publish flow |
-| `PackageKind` | 19 variants exist, but no extensibility mechanism (can't add new kinds without code change) |
+The following commands passed on this branch after the ownership and trust parity change:
 
----
+```text
+cargo fmt --all -- --check
+cargo check --locked --all-targets
+cargo check --locked --all-targets --features postgres
+cargo clippy --locked --all-targets -- -D warnings
+cargo clippy --locked --all-targets --features postgres -- -D warnings
+cargo test --locked --all-targets
+cargo test --locked --all-targets --features postgres
+```
 
-## What Is Incomplete
+The PostgreSQL integration test remains conditional on KOP_TEST_DATABASE_URL; CI supplies that database. Release artifacts include checksums, an SBOM, and GitHub artifact attestations; platform signing and publisher signature verification remain separate release concerns.
 
-| Area | Gap |
-|------|-----|
-| Publisher HTTP endpoints | No `POST /api/v1/publishers`, `GET /api/v1/publishers/{name}` |
-| Token HTTP endpoints | No `POST /api/v1/tokens`, `GET /api/v1/tokens`, `DELETE /api/v1/tokens/{id}` |
-| Token scopes | No scope field on `ApiToken` — all tokens have all permissions |
-| Token expiration | Field exists (`expires_at`) but NOT checked during auth |
-| Token last-used | No field for `last_used_at` — tracking not implemented |
-| Rate limiting | Config values exist but NO middleware enforcement |
-| Dependency model | No dependency fields, no resolver, no lock file |
-| Namespace model | No `@publisher/package` format — flat ID space |
-| Package immutability | No yank/unyank/tombstone/deprecate |
-| Provenance | No commit SHA, tag, forge identity, source repository metadata |
-| Forge adapter | No abstraction for GitHub/GitLab/Codeberg/Forgejo |
-| Compatibility query | No "can runtime X install package Y" endpoint |
-| Adapter model | No runtime adapter concept |
-| Search V2 | ILIKE only, no full-text search, no ranking signals |
-| Discovery algorithms | trending = downloads DESC, featured = success_rate DESC — simplistic |
-| Review constraints | No one-review-per-publisher check, no update/delete review |
-| Key lifecycle | No key registration, rotation, revocation, fingerprint |
-| Signing payload | No canonical signing format defined |
-| OpenAPI spec | None |
-| Docker | None |
-| Request IDs | Not generated or logged |
-| Health vs Readiness | `/ready` doesn't check DB connectivity |
-| Observability metrics | No metrics endpoint or instrumentation |
+## Next Order
 
----
-
-## What Is Feature-Gated
-
-| Feature | Flag | Status |
-|---------|------|--------|
-| PostgreSQL backend | `postgres` | Compiles, not integration-tested |
-| Artifact fetching | `reqwest` | Compiles, `fetch_with_redirect_limit` works, not called from publish |
-| In-memory backend | (default) | Full support, all tests use this |
-
----
-
-## What Requires PostgreSQL
-
-- Production persistence
-- CI migration verification
-- Full-text search (future)
-- Concurrent write safety
-- Transaction boundaries for publish
-
----
-
-## What Requires Artifact Fetching
-
-- Content hash verification during publish
-- Signature verification against actual artifact bytes
-- Artifact metadata extraction (size, content-type)
-- Streaming downloads with redirect enforcement
-
----
-
-## What Is NOT Yet Marketplace-Ready
-
-1. **No namespace model** — flat package IDs allow collision and impersonation
-2. **No dependency resolution** — packages can't declare or resolve dependencies
-3. **No publisher/token management endpoints** — can't register or manage tokens via API
-4. **No rate limiting** — search/download/publish are unprotected
-5. **No package immutability** — published versions can be silently replaced
-6. **No provenance** — no Git forge metadata, commit SHAs, or source verification
-7. **No compatibility query** — can't answer "can runtime X install package Y"
-8. **No OpenAPI spec** — no machine-readable API contract
-9. **No Docker** — can't self-host with `docker compose up`
-10. **No SBOM** — supply chain verification missing
-11. **No request IDs** — errors can't be traced
-12. **Postgres not tested** — backend compiles but has zero integration test coverage
-13. **No key lifecycle** — signing keys can't be registered, rotated, or revoked
-14. **No adapter model** — packages can't declare runtime-specific installation
-15. **No private/unlisted packages** — all packages are public
+1. Add concurrent PostgreSQL parity tests for publish, review, download, and trust transitions.
+2. Add invitations, identity verification, and stronger public-registration abuse controls.
+3. Add version constraints, lockfiles, and compatibility decisions beyond the current resolver.
+4. Add distributed download fraud detection and stronger anti-manipulation analytics.
+5. Add runtime adapters, package transfer policy, and a machine-generated OpenAPI document.
+6. Configure release signing keys, rotation procedures, and hosted web deployment controls.

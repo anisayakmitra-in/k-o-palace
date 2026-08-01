@@ -1,20 +1,64 @@
 //! API integration tests.
 
 use axum::body::Body;
+use axum::extract::connect_info::ConnectInfo;
 use axum::http::{Request, StatusCode};
 use chrono::Utc;
+use k_o_palace::rate_limit::{RateLimiter, RateLimiters};
 use k_o_palace::{
     app::AppState,
-    auth::register_publisher,
+    auth::{create_api_token_with_options, register_publisher},
     config::PalaceConfig,
-    models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind, TrustInfo, TrustLevel},
+    models::{
+        CapabilityInfo, CompatibilityInfo, Package, PackageKind, Review, ReviewStatus, Role,
+        TrustInfo, TrustLevel,
+    },
     routes::router,
 };
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tower::ServiceExt;
+use uuid::Uuid;
 
 fn test_state() -> AppState {
     let config = PalaceConfig::default();
     AppState::in_memory(config)
+}
+
+fn read_limited_state(trust_forwarded_headers: bool, trusted_proxy_ips: Vec<IpAddr>) -> AppState {
+    let mut config = PalaceConfig::default();
+    config.security.trust_forwarded_headers = trust_forwarded_headers;
+    config.security.trusted_proxy_ips = trusted_proxy_ips;
+    let mut state = AppState::in_memory(config);
+    state.rate_limiters = Arc::new(RateLimiters {
+        publish: RateLimiter::new(10),
+        search: RateLimiter::new(10),
+        download: RateLimiter::new(10),
+        review: RateLimiter::new(10),
+        auth: RateLimiter::new(10),
+        resolve: RateLimiter::new(10),
+        read: RateLimiter::new(1),
+    });
+    state
+}
+
+fn endpoint_limited_state() -> AppState {
+    let mut config = PalaceConfig::default();
+    config.security.trust_forwarded_headers = true;
+    config.security.allow_public_registration = true;
+    let mut state = AppState::in_memory(config);
+    state.rate_limiters = Arc::new(RateLimiters {
+        publish: RateLimiter::new(10),
+        search: RateLimiter::new(1),
+        download: RateLimiter::new(1),
+        review: RateLimiter::new(10),
+        auth: RateLimiter::new(1),
+        resolve: RateLimiter::new(1),
+        read: RateLimiter::new(100),
+    });
+    state
 }
 
 fn valid_pkg(id: impl Into<String>) -> Package {
@@ -38,9 +82,7 @@ fn valid_pkg(id: impl Into<String>) -> Package {
         success_rate: 0.0,
         compatibility: CompatibilityInfo::default(),
         repository: Some("https://github.com/test/test".into()),
-        artifact_url: Some(
-            "https://github.com/test/test/releases/download/v1.0.0/pkg.tar.gz".into(),
-        ),
+        artifact_url: None,
         homepage: None,
         tags: vec!["test".into()],
         yanked: false,
@@ -49,6 +91,45 @@ fn valid_pkg(id: impl Into<String>) -> Package {
         created_at: Utc::now(),
         updated_at: Utc::now(),
     }
+}
+
+fn review(package_id: impl Into<String>, reviewer_id: Uuid, rating: i16, comment: &str) -> Review {
+    Review {
+        id: Uuid::new_v4(),
+        package_id: package_id.into(),
+        reviewer_id,
+        rating,
+        comment: Some(comment.into()),
+        status: ReviewStatus::Published,
+        moderated_by: None,
+        moderation_reason: None,
+        moderated_at: None,
+        created_at: Utc::now(),
+    }
+}
+
+async fn register_moderator(
+    state: &AppState,
+    name: &str,
+) -> (k_o_palace::models::Publisher, String) {
+    let (publisher, _token) = register_publisher(&state.repo, name, name, None, None)
+        .await
+        .unwrap();
+    let publisher = state
+        .repo
+        .update_publisher_role(publisher.id, Role::Moderator)
+        .await
+        .unwrap();
+    let (token, _) = create_api_token_with_options(
+        &state.repo,
+        publisher.id,
+        format!("{name}-moderation"),
+        None,
+        vec!["moderation:write".into()],
+    )
+    .await
+    .unwrap();
+    (publisher, token)
 }
 
 #[tokio::test]
@@ -84,6 +165,100 @@ async fn unauthenticated_publish_fails() {
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 }
 
+#[tokio::test]
+async fn unnamespaced_package_cannot_be_taken_over() {
+    let state = test_state();
+    let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (_other, other_token) = register_publisher(&state.repo, "other", "Other", None, None)
+        .await
+        .unwrap();
+
+    let mut package = valid_pkg("legacy.package");
+    package.trust.publisher = owner.name.clone();
+    let response = router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {owner_token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    package.version = "1.1.0".into();
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {other_token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+#[tokio::test]
+async fn concurrent_unnamespaced_publications_have_one_owner() {
+    let state = test_state();
+    let (owner, owner_token) =
+        register_publisher(&state.repo, "concurrent-owner", "Owner", None, None)
+            .await
+            .unwrap();
+    let (other, other_token) =
+        register_publisher(&state.repo, "concurrent-other", "Other", None, None)
+            .await
+            .unwrap();
+
+    let owner_package = valid_pkg("concurrent.package");
+    let mut other_package = owner_package.clone();
+    other_package.version = "2.0.0".into();
+
+    let owner_request = Request::post("/api/v1/packages")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {owner_token}"))
+        .body(Body::from(serde_json::to_string(&owner_package).unwrap()))
+        .unwrap();
+    let other_request = Request::post("/api/v1/packages")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {other_token}"))
+        .body(Body::from(serde_json::to_string(&other_package).unwrap()))
+        .unwrap();
+
+    let inspection_state = state.clone();
+    let (owner_result, other_result) = tokio::join!(
+        router(state.clone()).oneshot(owner_request),
+        router(state).oneshot(other_request),
+    );
+    let owner_response = owner_result.unwrap();
+    let other_response = other_result.unwrap();
+    let owner_created = owner_response.status() == StatusCode::CREATED;
+    let other_created = other_response.status() == StatusCode::CREATED;
+
+    assert_ne!(owner_created, other_created);
+    let expected_owner = if owner_created { owner.id } else { other.id };
+    assert_eq!(
+        inspection_state
+            .repo
+            .get_package_publisher_id("concurrent.package")
+            .await
+            .unwrap(),
+        Some(expected_owner)
+    );
+    assert_eq!(
+        inspection_state
+            .repo
+            .list_versions("concurrent.package")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
 #[tokio::test]
 async fn authenticated_publish_succeeds() {
     let state = test_state();
@@ -187,4 +362,809 @@ async fn pagination_total_is_accurate() {
     assert_eq!(list.packages.len(), 2);
     assert_eq!(list.limit, 2);
     assert_eq!(list.offset, 0);
+}
+
+#[tokio::test]
+async fn authenticated_publish_uses_the_authenticated_publisher_as_author() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let app = router(state);
+    let mut pkg = valid_pkg("owner/package");
+    pkg.author = "client-supplied-author".into();
+    pkg.trust.publisher = "client-supplied-publisher".into();
+
+    let response = app
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&pkg).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let package: Package = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(package.author, publisher.name);
+    assert_eq!(package.trust.publisher, publisher.name);
+}
+
+#[tokio::test]
+async fn published_package_versions_cannot_be_updated() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let mut package = valid_pkg("immutable");
+    package.trust.publisher = publisher.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::put("/api/v1/packages/immutable")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn artifact_publish_without_digest_is_rejected_before_persistence() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let mut package = valid_pkg("unverified-artifact");
+    package.trust.publisher = publisher.name;
+    package.artifact_url =
+        Some("https://github.com/test/test/releases/download/v1.0.0/pkg.tar.gz".into());
+
+    let app = router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/v1/packages/unverified-artifact")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn artifact_publish_with_malformed_digest_is_rejected_before_fetching() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let mut package = valid_pkg("malformed-artifact");
+    package.trust.publisher = publisher.name;
+    package.artifact_url =
+        Some("https://github.com/test/test/releases/download/v1.0.0/pkg.tar.gz".into());
+    package.trust.content_hash = Some("sha256:not-a-digest".into());
+
+    let app = router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/v1/packages/malformed-artifact")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn missing_download_version_is_rejected() {
+    let state = test_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("download.gene"))
+        .await
+        .unwrap();
+
+    let error = state
+        .repo
+        .record_download("download.gene", "9.9.9")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, k_o_palace::error::PalaceErrorCode::NotFound);
+}
+
+#[tokio::test]
+async fn download_accounting_deduplicates_same_context_for_one_hour() {
+    let state = test_state();
+    let package = valid_pkg("downloaded");
+    state.repo.publish_package(&package).await.unwrap();
+
+    assert!(state
+        .repo
+        .record_download_with_context(&package.id, &package.version, Some("client-key"))
+        .await
+        .unwrap());
+    assert!(!state
+        .repo
+        .record_download_with_context(&package.id, &package.version, Some("client-key"))
+        .await
+        .unwrap());
+    assert_eq!(
+        state.repo.get_package(&package.id).await.unwrap().downloads,
+        1
+    );
+
+    assert!(state
+        .repo
+        .record_download_with_context(&package.id, &package.version, Some("other-client"))
+        .await
+        .unwrap());
+    assert_eq!(
+        state.repo.get_package(&package.id).await.unwrap().downloads,
+        2
+    );
+}
+
+#[tokio::test]
+async fn publisher_cannot_moderate_review() {
+    let state = test_state();
+    let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (reviewer, _reviewer_token) =
+        register_publisher(&state.repo, "reviewer", "Reviewer", None, None)
+            .await
+            .unwrap();
+    let mut package = valid_pkg("moderation-package");
+    package.trust.publisher = owner.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let seeded_review = review(&package.id, reviewer.id, 4, "looks good");
+    state.repo.add_review(&seeded_review).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::patch(format!(
+                "/api/v1/packages/{}/reviews/{}",
+                package.id, seeded_review.id
+            ))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {owner_token}"))
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "hidden",
+                    "reason": "abusive"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn moderator_can_hide_review() {
+    let state = test_state();
+    let (owner, _owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (reviewer, _reviewer_token) =
+        register_publisher(&state.repo, "reviewer", "Reviewer", None, None)
+            .await
+            .unwrap();
+    let (moderator, moderator_token) = register_moderator(&state, "moderator").await;
+
+    let mut package = valid_pkg("moderation-target");
+    package.trust.publisher = owner.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let seeded_review = review(&package.id, reviewer.id, 2, "needs work");
+    state.repo.add_review(&seeded_review).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::patch(format!(
+                "/api/v1/packages/{}/reviews/{}",
+                package.id, seeded_review.id
+            ))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {moderator_token}"))
+            .body(Body::from(
+                serde_json::json!({
+                    "status": "hidden",
+                    "reason": "personal attack"
+                })
+                .to_string(),
+            ))
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let review: Review = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(review.status, ReviewStatus::Hidden);
+    assert_eq!(review.moderated_by, Some(moderator.id));
+    assert_eq!(review.moderation_reason.as_deref(), Some("personal attack"));
+    assert!(review.moderated_at.is_some());
+}
+
+#[tokio::test]
+async fn list_reviews_excludes_hidden_reviews() {
+    let state = test_state();
+    let (owner, _owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (reviewer_one, _token_one) =
+        register_publisher(&state.repo, "reviewer-one", "Reviewer One", None, None)
+            .await
+            .unwrap();
+    let (reviewer_two, _token_two) =
+        register_publisher(&state.repo, "reviewer-two", "Reviewer Two", None, None)
+            .await
+            .unwrap();
+    let (moderator, _moderator_token) = register_moderator(&state, "moderator").await;
+
+    let mut package = valid_pkg("public-review-list");
+    package.trust.publisher = owner.name;
+    state.repo.publish_package(&package).await.unwrap();
+
+    let visible_review = review(&package.id, reviewer_one.id, 5, "visible");
+    let hidden_review = review(&package.id, reviewer_two.id, 1, "hidden");
+    state.repo.add_review(&visible_review).await.unwrap();
+    state.repo.add_review(&hidden_review).await.unwrap();
+    state
+        .repo
+        .moderate_review(
+            &package.id,
+            hidden_review.id,
+            ReviewStatus::Hidden,
+            moderator.id,
+            Some("spam".into()),
+        )
+        .await
+        .unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get(format!("/api/v1/packages/{}/reviews", package.id))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let reviews: Vec<Review> = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(reviews.len(), 1);
+    assert_eq!(reviews[0].id, visible_review.id);
+}
+
+#[tokio::test]
+async fn publisher_verification_requires_moderator_and_is_persisted() {
+    let state = test_state();
+    let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (_moderator, moderator_token) = register_moderator(&state, "moderator").await;
+    let app = router(state.clone());
+
+    let body = serde_json::json!({
+        "verified": true,
+        "reason": "identity review completed"
+    });
+
+    let denied = app
+        .clone()
+        .oneshot(
+            Request::patch("/api/v1/publishers/owner/verification")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {owner_token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+
+    let accepted = app
+        .oneshot(
+            Request::patch("/api/v1/publishers/owner/verification")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {moderator_token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(accepted.status(), StatusCode::OK);
+
+    let response: k_o_palace::models::PublisherVerification = serde_json::from_slice(
+        &axum::body::to_bytes(accepted.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(response.publisher_id, owner.id);
+    assert!(response.verified);
+    assert_eq!(
+        response.reason.as_deref(),
+        Some("identity review completed")
+    );
+
+    let stored = state
+        .repo
+        .get_publisher_verification(owner.id)
+        .await
+        .unwrap();
+    assert!(stored.verified);
+    assert!(stored.verified_at.is_some());
+    assert!(stored.verified_by.is_some());
+}
+
+#[tokio::test]
+async fn dependency_resolution_endpoint_returns_capability_graph() {
+    let state = test_state();
+    let mut root = valid_pkg("root.package");
+    root.capabilities.requires = vec!["cap.database".into()];
+
+    let mut dependency = valid_pkg("database.package");
+    dependency.capabilities.provides = vec!["cap.database".into()];
+    dependency.compatibility = CompatibilityInfo {
+        runtimes: vec!["pandora".into()],
+        platforms: vec!["windows".into()],
+    };
+
+    state.repo.publish_package(&root).await.unwrap();
+    state.repo.publish_package(&dependency).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/root.package/resolve?runtime=pandora&platform=windows")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body: k_o_palace::resolve::ResolutionResponse = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(body.complete);
+    assert_eq!(body.resolved_dependencies.len(), 1);
+    assert_eq!(
+        body.resolved_dependencies[0].selected_package_id.as_deref(),
+        Some("database.package")
+    );
+}
+
+#[tokio::test]
+async fn dependency_resolution_rejects_catalog_over_candidate_limit() {
+    let state = test_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("root.package"))
+        .await
+        .unwrap();
+    for index in 0..1_000 {
+        state
+            .repo
+            .publish_package(&valid_pkg(format!("candidate-{index}")))
+            .await
+            .unwrap();
+    }
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/root.package/resolve")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: k_o_palace::error::PalaceError = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.code, k_o_palace::error::PalaceErrorCode::TooLarge);
+}
+
+#[tokio::test]
+async fn dependency_resolution_rejects_catalog_over_serialized_byte_budget() {
+    let state = test_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("root.package"))
+        .await
+        .unwrap();
+    let mut oversized = valid_pkg("oversized-candidate");
+    oversized.description = "x".repeat(1024 * 1024);
+    state.repo.publish_package(&oversized).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/root.package/resolve")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: k_o_palace::error::PalaceError = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.code, k_o_palace::error::PalaceErrorCode::TooLarge);
+}
+
+#[tokio::test]
+async fn publisher_cannot_publish_under_another_namespace() {
+    let state = test_state();
+    let (_publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let package = valid_pkg("other/package");
+
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn untrusted_peer_cannot_rotate_forwarded_ips_to_bypass_public_read_limit() {
+    let app = router(read_limited_state(true, vec![]));
+    let peer: SocketAddr = "203.0.113.10:41000".parse().unwrap();
+
+    let mut first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1")
+        .body(Body::empty())
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    let first = app.clone().oneshot(first).await.unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let mut second = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.2")
+        .body(Body::empty())
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    let second = app.oneshot(second).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn disabled_proxy_header_trust_ignores_forwarded_ips_for_allowlisted_peer() {
+    let proxy_ip: IpAddr = "203.0.113.13".parse().unwrap();
+    let app = router(read_limited_state(false, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41003);
+
+    let mut first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1")
+        .body(Body::empty())
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut second = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.2")
+        .body(Body::empty())
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(second).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_uses_nearest_untrusted_forwarded_hop_for_public_read_limit() {
+    let proxy_ip: IpAddr = "203.0.113.11".parse().unwrap();
+    let intermediary_proxy_ip: IpAddr = "192.0.2.10".parse().unwrap();
+    let app = router(read_limited_state(
+        true,
+        vec![proxy_ip, intermediary_proxy_ip],
+    ));
+    let peer = SocketAddr::new(proxy_ip, 41001);
+
+    let mut first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "203.0.113.200, 198.51.100.1, 192.0.2.10")
+        .body(Body::empty())
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut second = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "203.0.113.201, 198.51.100.1, 192.0.2.10")
+        .body(Body::empty())
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(second).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_invalid_or_missing_forwarded_address_uses_direct_peer() {
+    let proxy_ip: IpAddr = "203.0.113.12".parse().unwrap();
+    let app = router(read_limited_state(true, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41002);
+
+    let mut invalid = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1, not-an-ip, 192.0.2.10")
+        .body(Body::empty())
+        .unwrap();
+    invalid.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(invalid).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut missing = Request::get("/api/v1/packages")
+        .body(Body::empty())
+        .unwrap();
+    missing.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(missing).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_empty_forwarded_element_uses_direct_peer() {
+    let proxy_ip: IpAddr = "203.0.113.14".parse().unwrap();
+    let app = router(read_limited_state(true, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41004);
+
+    let mut invalid = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1, , 192.0.2.10")
+        .body(Body::empty())
+        .unwrap();
+    invalid.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(invalid).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut missing = Request::get("/api/v1/packages")
+        .body(Body::empty())
+        .unwrap();
+    missing.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(missing).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn version_listing_applies_limit_and_offset_at_repository_boundary() {
+    let state = test_state();
+    let (publisher, _) =
+        register_publisher(&state.repo, "version-owner", "Version Owner", None, None)
+            .await
+            .unwrap();
+    let base = Utc::now();
+    for (index, version) in ["1.0.0", "2.0.0", "3.0.0"].into_iter().enumerate() {
+        let mut package = valid_pkg("version-page");
+        package.version = version.into();
+        package.trust.publisher = publisher.name.clone();
+        package.created_at = base + chrono::Duration::seconds(index as i64);
+        state
+            .repo
+            .publish_verified_package(&package, None, Some(publisher.id))
+            .await
+            .unwrap();
+    }
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/version-page/versions?limit=1&offset=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body, serde_json::json!({"total": 3, "versions": ["2.0.0"]}));
+}
+
+#[tokio::test]
+async fn endpoint_rate_limits_ignore_forwarded_ips_for_same_peer() {
+    let state = endpoint_limited_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("rate-limit-target"))
+        .await
+        .unwrap();
+    let app = router(state);
+    let peer: SocketAddr = "203.0.113.20:42000".parse().unwrap();
+
+    for path in [
+        "/api/v1/search?q=test",
+        "/api/v1/packages/rate-limit-target/resolve",
+        "/api/v1/packages/rate-limit-target/download",
+    ] {
+        let mut first = Request::get(path)
+            .header("x-forwarded-for", "198.51.100.1")
+            .body(Body::empty())
+            .unwrap();
+        first.extensions_mut().insert(ConnectInfo(peer));
+        let first = app.clone().oneshot(first).await.unwrap();
+        assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
+
+        let mut second = Request::get(path)
+            .header("x-forwarded-for", "198.51.100.2")
+            .body(Body::empty())
+            .unwrap();
+        second.extensions_mut().insert(ConnectInfo(peer));
+        let second = app.clone().oneshot(second).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn registration_rate_limit_ignores_forwarded_ips_for_same_peer() {
+    let app = router(endpoint_limited_state());
+    let peer: SocketAddr = "203.0.113.30:43000".parse().unwrap();
+
+    let mut first = Request::post("/api/v1/publishers")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "198.51.100.1")
+        .body(Body::from(
+            serde_json::json!({"name": "rate-one", "display_name": "Rate One"}).to_string(),
+        ))
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    let mut second = Request::post("/api/v1/publishers")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "198.51.100.2")
+        .body(Body::from(
+            serde_json::json!({"name": "rate-two", "display_name": "Rate Two"}).to_string(),
+        ))
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(second).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn missing_connect_info_uses_shared_anonymous_rate_limit_bucket() {
+    let app = router(endpoint_limited_state());
+    let first = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/search?q=first")
+                .header("x-forwarded-for", "198.51.100.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .oneshot(
+            Request::get("/api/v1/search?q=second")
+                .header("x-forwarded-for", "198.51.100.2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn oversized_trust_transition_reason_is_rejected() {
+    let state = test_state();
+    let (_moderator, token) = register_moderator(&state, "trust-moderator").await;
+    state
+        .repo
+        .publish_package(&valid_pkg("trust.reason"))
+        .await
+        .unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/packages/trust.reason/trust")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "level": "community",
+                        "reason": "x".repeat(501),
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

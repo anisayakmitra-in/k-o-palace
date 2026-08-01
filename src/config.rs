@@ -1,6 +1,6 @@
 //! Application configuration.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// Application configuration loaded from environment and files.
 #[derive(Debug, Clone)]
@@ -33,9 +33,10 @@ pub struct StorageConfig {
     pub github_release_api_url: Option<String>,
     pub allowed_hosts: Vec<String>,
     pub max_artifact_size_bytes: usize,
+    pub max_signed_artifact_size_bytes: usize,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum StorageBackend {
     #[default]
     Local,
@@ -54,11 +55,18 @@ pub struct SecurityConfig {
     pub rate_limit_publish_per_minute: u32,
     pub rate_limit_search_per_minute: u32,
     pub rate_limit_download_per_minute: u32,
+    pub rate_limit_review_per_minute: u32,
     pub rate_limit_auth_per_minute: u32,
+    pub rate_limit_resolve_per_minute: u32,
     pub token_hash_cost: u32,
     pub require_https_in_production: bool,
     pub max_body_bytes: usize,
     pub request_timeout_secs: u64,
+    pub trust_forwarded_headers: bool,
+    pub trusted_proxy_ips: Vec<IpAddr>,
+    pub allow_public_registration: bool,
+    pub behind_tls_proxy: bool,
+    pub replica_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -81,7 +89,7 @@ impl Default for PalaceConfig {
                 body_limit_bytes: 16 * 1024 * 1024,
             },
             database: DatabaseConfig {
-                url: "postgres://kopalace:kopalace@localhost:5432/kopalace".into(),
+                url: String::new(),
                 max_connections: 10,
             },
             storage: StorageConfig {
@@ -90,17 +98,25 @@ impl Default for PalaceConfig {
                 github_release_api_url: None,
                 allowed_hosts: vec![],
                 max_artifact_size_bytes: 512 * 1024 * 1024,
+                max_signed_artifact_size_bytes: 64 * 1024 * 1024,
             },
             security: SecurityConfig {
                 cors_origins: vec![],
                 rate_limit_publish_per_minute: 10,
                 rate_limit_search_per_minute: 120,
                 rate_limit_download_per_minute: 240,
+                rate_limit_review_per_minute: 10,
                 rate_limit_auth_per_minute: 10,
+                rate_limit_resolve_per_minute: 60,
                 token_hash_cost: bcrypt::DEFAULT_COST,
                 require_https_in_production: true,
                 max_body_bytes: 16 * 1024 * 1024,
                 request_timeout_secs: 30,
+                trust_forwarded_headers: false,
+                trusted_proxy_ips: vec![],
+                allow_public_registration: false,
+                behind_tls_proxy: false,
+                replica_count: 1,
             },
             registry: RegistryConfig {
                 seed_samples: false,
@@ -112,9 +128,24 @@ impl Default for PalaceConfig {
     }
 }
 
+impl StorageBackend {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "local" => Some(Self::Local),
+            "github" | "github_release" => Some(Self::GitHub),
+            "gitlab" => Some(Self::GitLab),
+            "codeberg" => Some(Self::Codeberg),
+            "oci" => Some(Self::Oci),
+            "s3" => Some(Self::S3),
+            "azure" => Some(Self::Azure),
+            "gcs" => Some(Self::Gcs),
+            _ => None,
+        }
+    }
+}
 impl PalaceConfig {
-    /// Load configuration from environment variables.
-    pub fn from_env() -> Self {
+    /// Load and validate configuration from environment variables.
+    pub fn try_from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Ok(addr) = std::env::var("PALACE_BIND") {
             if let Ok(socket) = addr.parse() {
@@ -124,15 +155,221 @@ impl PalaceConfig {
         if let Ok(url) = std::env::var("DATABASE_URL") {
             cfg.database.url = url;
         }
+        if let Ok(value) = std::env::var("PALACE_DB_MAX_CONNECTIONS") {
+            if let Ok(value) = value.parse::<u32>() {
+                cfg.database.max_connections = value.max(1);
+            }
+        }
         if let Ok(url) = std::env::var("PALACE_PUBLIC_URL") {
             cfg.server.public_url = url;
         }
         if let Ok(cors) = std::env::var("PALACE_CORS_ORIGINS") {
             cfg.security.cors_origins = cors.split(',').map(|s| s.trim().to_string()).collect();
         }
+        if let Ok(hosts) = std::env::var("PALACE_ALLOWED_HOSTS") {
+            cfg.storage.allowed_hosts = hosts
+                .split(',')
+                .map(|s| s.trim().to_ascii_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        if let Ok(backend) = std::env::var("PALACE_STORAGE_BACKEND") {
+            cfg.storage.backend = StorageBackend::parse(&backend)
+                .ok_or_else(|| format!("unknown PALACE_STORAGE_BACKEND value '{backend}'"))?;
+        }
+        if let Ok(path) = std::env::var("PALACE_STORAGE_LOCAL_PATH") {
+            cfg.storage.local_path = Some(path);
+        }
+        if let Ok(url) = std::env::var("PALACE_GITHUB_RELEASE_API_URL") {
+            cfg.storage.github_release_api_url = Some(url);
+        }
+        if let Ok(size) = std::env::var("PALACE_MAX_ARTIFACT_SIZE_BYTES") {
+            if let Ok(value) = size.parse() {
+                cfg.storage.max_artifact_size_bytes = value;
+            }
+        }
+        if let Ok(size) = std::env::var("PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES") {
+            if let Ok(value) = size.parse() {
+                cfg.storage.max_signed_artifact_size_bytes = value;
+            }
+        }
+        if let Ok(size) = std::env::var("PALACE_MAX_BODY_BYTES") {
+            if let Ok(value) = size.parse() {
+                cfg.security.max_body_bytes = value;
+                cfg.server.body_limit_bytes = value;
+            }
+        }
+        if let Ok(seconds) = std::env::var("PALACE_REQUEST_TIMEOUT_SECS") {
+            if let Ok(value) = seconds.parse() {
+                cfg.security.request_timeout_secs = value;
+                cfg.server.request_timeout_seconds = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_PUBLISH_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_publish_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_SEARCH_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_search_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_download_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_REVIEW_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_review_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_AUTH_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_auth_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_RESOLVE_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_resolve_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_ALLOW_PUBLIC_REGISTRATION") {
+            cfg.security.allow_public_registration =
+                value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        if let Ok(value) = std::env::var("PALACE_TRUST_PROXY_HEADERS") {
+            cfg.security.trust_forwarded_headers =
+                value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        if let Ok(value) = std::env::var("PALACE_TRUSTED_PROXY_IPS") {
+            cfg.security.trusted_proxy_ips = value
+                .split(',')
+                .map(str::trim)
+                .filter(|address| !address.is_empty())
+                .map(|address| {
+                    address.parse::<IpAddr>().map_err(|_| {
+                        format!("invalid PALACE_TRUSTED_PROXY_IPS address '{address}'")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
+        if let Ok(value) = std::env::var("PALACE_BEHIND_TLS_PROXY") {
+            cfg.security.behind_tls_proxy = value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        if let Ok(value) = std::env::var("PALACE_REPLICA_COUNT") {
+            if let Ok(value) = value.parse::<usize>() {
+                if value > 0 {
+                    cfg.security.replica_count = value;
+                }
+            }
+        }
         if let Ok(seed) = std::env::var("PALACE_SEED_SAMPLES") {
             cfg.registry.seed_samples = seed == "1" || seed.eq_ignore_ascii_case("true");
         }
-        cfg
+        if let Ok(value) = std::env::var("PALACE_REQUIRE_HTTPS") {
+            cfg.security.require_https_in_production =
+                value == "1" || value.eq_ignore_ascii_case("true");
+        }
+        Ok(cfg)
+    }
+
+    /// Load configuration from the environment, panicking when it is invalid.
+    #[deprecated(note = "use PalaceConfig::try_from_env to handle invalid configuration")]
+    pub fn from_env() -> Self {
+        Self::try_from_env().unwrap_or_else(|error| panic!("invalid Palace configuration: {error}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PalaceConfig;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn startup_security_defaults_are_single_replica_without_tls_proxy() {
+        let config = PalaceConfig::default();
+
+        assert!(!config.security.behind_tls_proxy);
+        assert_eq!(config.security.replica_count, 1);
+    }
+
+    #[test]
+    fn startup_security_settings_are_loaded_from_environment() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_BEHIND_TLS_PROXY", "true");
+        std::env::set_var("PALACE_REPLICA_COUNT", "3");
+
+        let config = PalaceConfig::try_from_env().unwrap();
+
+        std::env::remove_var("PALACE_BEHIND_TLS_PROXY");
+        std::env::remove_var("PALACE_REPLICA_COUNT");
+        assert!(config.security.behind_tls_proxy);
+        assert_eq!(config.security.replica_count, 3);
+    }
+
+    #[test]
+    fn trusted_proxy_ips_are_loaded_as_exact_addresses() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_TRUST_PROXY_HEADERS", "true");
+        std::env::set_var("PALACE_TRUSTED_PROXY_IPS", "127.0.0.1, 2001:db8::1");
+
+        let config = PalaceConfig::try_from_env().unwrap();
+
+        std::env::remove_var("PALACE_TRUST_PROXY_HEADERS");
+        std::env::remove_var("PALACE_TRUSTED_PROXY_IPS");
+        assert!(config.security.trust_forwarded_headers);
+        assert_eq!(
+            config.security.trusted_proxy_ips,
+            vec![
+                "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+                "2001:db8::1".parse::<std::net::IpAddr>().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_trusted_proxy_ip_is_rejected() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_TRUSTED_PROXY_IPS", "127.0.0.1,not-an-ip");
+
+        let result = PalaceConfig::try_from_env();
+
+        std::env::remove_var("PALACE_TRUSTED_PROXY_IPS");
+        assert_eq!(
+            result.unwrap_err(),
+            "invalid PALACE_TRUSTED_PROXY_IPS address 'not-an-ip'"
+        );
+    }
+
+    #[test]
+    fn unknown_storage_backend_is_rejected() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_STORAGE_BACKEND", "unknown");
+
+        let result = PalaceConfig::try_from_env();
+
+        std::env::remove_var("PALACE_STORAGE_BACKEND");
+        assert_eq!(
+            result.unwrap_err(),
+            "unknown PALACE_STORAGE_BACKEND value 'unknown'"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn compatibility_from_env_returns_self_and_panics_on_invalid_config() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("PALACE_STORAGE_BACKEND");
+        let config: PalaceConfig = PalaceConfig::from_env();
+        assert_eq!(config.storage.backend, super::StorageBackend::Local);
+
+        std::env::set_var("PALACE_STORAGE_BACKEND", "unknown");
+        let result = std::panic::catch_unwind(PalaceConfig::from_env);
+        std::env::remove_var("PALACE_STORAGE_BACKEND");
+        assert!(result.is_err());
     }
 }

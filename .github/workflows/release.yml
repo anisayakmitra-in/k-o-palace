@@ -1,0 +1,251 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish
+        required: true
+        type: string
+
+env:
+  RUST_TOOLCHAIN: 1.97.1
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Verify release source
+    runs-on: ubuntu-latest
+    outputs:
+      release_commit: ${{ steps.release_source.outputs.commit }}
+    services:
+      postgres:
+        image: postgres:16@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+        env:
+          POSTGRES_USER: kopalace
+          POSTGRES_PASSWORD: kopalace
+          POSTGRES_DB: kopalace_release
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fetch origin/main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: Verify tag source and package version
+        id: release_source
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-source.sh "$VERSION"
+          echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Verify release packaging helpers
+        run: bash scripts/test-release-packaging.sh
+      - name: Verify release gates
+        run: bash scripts/test-release-gates.sh
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt, clippy
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install web dependencies
+        run: npm ci --prefix web
+      - name: Test web client
+        run: npm test --prefix web
+      - name: Build web client
+        run: npm run build --prefix web
+      - name: Audit web dependencies
+        run: npm audit --prefix web --audit-level=high
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check workspace
+        run: cargo check --locked --all-targets --features postgres
+      - name: Run clippy
+        run: cargo clippy --locked --all-targets --features postgres -- -D warnings
+      - name: Run tests
+        run: cargo test --locked --all-targets --features postgres
+        env:
+          KOP_TEST_DATABASE_URL: postgres://kopalace:kopalace@localhost:5432/kopalace_release
+      - name: Verify migrations
+        run: |
+          cargo install sqlx-cli --version 0.9.0 --locked --no-default-features --features postgres,rustls
+          sqlx migrate run --source migrations
+        env:
+          DATABASE_URL: postgres://kopalace:kopalace@localhost:5432/kopalace_release
+      - name: Audit dependencies
+        run: cargo install cargo-audit --version 0.22.2 --locked && cargo audit
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: zip
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: tar.gz
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: tar.gz
+    runs-on: ${{ matrix.os }}
+    needs: verify
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.verify.outputs.release_commit }}
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package Unix artifact
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/stage
+          cp "target/${TARGET}/release/k-o-palace" dist/stage/k-o-palace
+          cp LICENSE README.md dist/stage/
+          archive="dist/k-o-palace-${VERSION}-${TARGET}.tar.gz"
+          tar -C dist/stage -czf "$archive" .
+          bash scripts/write-sha256-sidecar.sh "$archive"
+
+      - name: Package Windows artifact
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          $stage = "dist\stage"
+          New-Item -ItemType Directory -Force $stage | Out-Null
+          Copy-Item "target\$env:TARGET\release\k-o-palace.exe" "$stage\k-o-palace.exe"
+          Copy-Item LICENSE,README.md $stage
+          $archive = "dist\k-o-palace-$env:VERSION-$env:TARGET.zip"
+          Compress-Archive -Path "$stage\*" -DestinationPath $archive
+          $hash = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $(Split-Path $archive -Leaf)" | Set-Content "${archive}.sha256"
+
+      - name: Upload release artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/k-o-palace-*
+          if-no-files-found: error
+
+  sbom:
+    name: Generate release SBOM
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.verify.outputs.release_commit }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@72d126e709cad40056a62344eee609d696d62d33
+      - name: Generate SBOM
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cargo install cargo-cyclonedx --version 0.5.9 --locked
+          cargo cyclonedx -f json
+          mv -- *.cdx.json "k-o-palace-$VERSION.cdx.json"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-sbom
+          path: k-o-palace-*.cdx.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: [verify, build, sbom]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ needs.verify.outputs.release_commit }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+      - name: Fetch origin/main
+        run: git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+      - name: Reverify release source
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          bash scripts/verify-release-source.sh "$VERSION"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Download SBOM
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-sbom
+          path: dist
+      - name: Create checksum manifest
+        working-directory: dist
+        env:
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          set -euo pipefail
+          cat -- *.sha256 | sort > "k-o-palace-$VERSION-SHA256SUMS.txt"
+      - name: Verify every release checksum sidecar
+        run: bash scripts/verify-release-checksums.sh dist
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2
+        with:
+          subject-path: dist/*
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.tag || github.ref_name }}
+        run: |
+          gh release create "$VERSION" dist/* \
+            --verify-tag \
+            --title "K-O Palace $VERSION" \
+            --generate-notes

@@ -9,6 +9,9 @@ publish = false
 [dependencies]
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-core = "0.3"
+bytes = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tower = "0.5"
@@ -21,7 +24,7 @@ sha2 = "0.10"
 hex = "0.4"
 thiserror = "2"
 serde_urlencoded = "0.7"
-validator = { version = "0.19", features = ["derive"] }
+validator = { version = "0.21.0", features = ["derive"] }
 regex = "1"
 url = "2"
 semver = "1"
@@ -31,7 +34,7 @@ rand = "0.8"
 argon2 = "0.5"
 bcrypt = "0.16"
 # SQLx with runtime choice (default tokio + rustls)
-sqlx = { version = "0.8", features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "migrate", "json"], optional = true }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio-rustls", "postgres", "uuid", "chrono", "macros", "migrate", "json"], optional = true }
 # Configuration
 config = "0.15"
 # Rate limiting
@@ -45,7 +48,7 @@ reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
 tokio-test = "0.4"
 
 [features]
-default = []
+default = ["postgres", "reqwest"]
 postgres = ["dep:sqlx"]
 reqwest = ["dep:reqwest"]
 memory = []

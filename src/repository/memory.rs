@@ -4,20 +4,28 @@ use crate::error::{PalaceError, PalaceErrorCode, PalaceResult};
 use crate::models::*;
 use crate::pagination::Pagination;
 use crate::repository::PackageFilters;
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
 
+type DownloadDedupeKey = (String, String, String);
+type DownloadDedupeMap = HashMap<DownloadDedupeKey, chrono::DateTime<Utc>>;
+
 #[derive(Debug, Default, Clone)]
 pub struct InMemoryRepository {
     publishers: Arc<RwLock<HashMap<Uuid, Publisher>>>,
+    verifications: Arc<RwLock<HashMap<Uuid, PublisherVerification>>>,
     tokens: Arc<RwLock<HashMap<Uuid, ApiToken>>>,
+    last_used: Arc<RwLock<HashMap<Uuid, chrono::DateTime<Utc>>>>,
     packages: Arc<RwLock<HashMap<String, Vec<Package>>>>,
+    package_owners: Arc<RwLock<HashMap<String, Uuid>>>,
     reviews: Arc<RwLock<HashMap<String, Vec<Review>>>>,
     transitions: Arc<RwLock<HashMap<String, Vec<TrustTransition>>>>,
     audit: Arc<RwLock<Vec<AuditEvent>>>,
+    download_dedup: Arc<RwLock<DownloadDedupeMap>>,
+    artifacts: Arc<RwLock<HashMap<(String, String), crate::repository::VerifiedArtifact>>>,
 }
 
 impl InMemoryRepository {
@@ -33,7 +41,7 @@ impl InMemoryRepository {
         let pkgs = self.packages.read().await;
         let mut out: Vec<Package> = pkgs
             .values()
-            .flat_map(|versions| versions.iter().max_by_key(|p| &p.version).cloned())
+            .flat_map(|versions| versions.iter().max_by_key(|p| p.version.clone()).cloned())
             .collect();
 
         if let Some(kind) = filters.kind {
@@ -90,6 +98,14 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "publisher not found"))
     }
 
+    pub async fn list_publishers(&self) -> PalaceResult<Vec<Publisher>> {
+        let map = self.publishers.read().await;
+        let mut publishers = map.values().cloned().collect::<Vec<_>>();
+        publishers.sort_by(|left, right| left.name.cmp(&right.name));
+        publishers.truncate(10_000);
+        Ok(publishers)
+    }
+
     pub async fn update_publisher_role(&self, id: Uuid, role: Role) -> PalaceResult<Publisher> {
         let mut map = self.publishers.write().await;
         let publisher = map
@@ -99,23 +115,86 @@ impl InMemoryRepository {
         Ok(publisher.clone())
     }
 
+    pub async fn get_publisher_verification(
+        &self,
+        publisher_id: Uuid,
+    ) -> PalaceResult<PublisherVerification> {
+        self.get_publisher_by_id(publisher_id).await?;
+        let map = self.verifications.read().await;
+        Ok(map
+            .get(&publisher_id)
+            .cloned()
+            .unwrap_or(PublisherVerification {
+                publisher_id,
+                verified: false,
+                verified_at: None,
+                verified_by: None,
+                reason: None,
+            }))
+    }
+
+    pub async fn set_publisher_verification(
+        &self,
+        verification: &PublisherVerification,
+    ) -> PalaceResult<PublisherVerification> {
+        let event = crate::repository::publisher_verification_audit(verification);
+        self.set_publisher_verification_with_audit(verification, &event)
+            .await
+    }
+
+    pub async fn set_publisher_verification_with_audit(
+        &self,
+        verification: &PublisherVerification,
+        event: &AuditEvent,
+    ) -> PalaceResult<PublisherVerification> {
+        self.get_publisher_by_id(verification.publisher_id).await?;
+        if let Some(verifier_id) = verification.verified_by {
+            self.get_publisher_by_id(verifier_id).await?;
+        }
+        crate::repository::validate_publisher_verification_audit(verification, event)?;
+
+        let mut verifications = self.verifications.write().await;
+        let mut audit = self.audit.write().await;
+        if audit.iter().any(|existing| existing.id == event.id) {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Conflict,
+                "audit event already exists",
+            ));
+        }
+
+        verifications.insert(verification.publisher_id, verification.clone());
+        audit.push(event.clone());
+        Ok(verification.clone())
+    }
+
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         let mut map = self.tokens.write().await;
         map.insert(token.id, token.clone());
         Ok(())
     }
 
+    pub async fn create_api_token_with_audit(
+        &self,
+        token: &ApiToken,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        self.create_api_token(token).await?;
+        self.record_audit_event(event).await
+    }
+
     pub async fn get_api_token_by_plaintext(&self, plaintext: &str) -> PalaceResult<ApiToken> {
-        let map = self.tokens.read().await;
-        map.values()
-            .find(|t| {
-                t.revoked_at.is_none()
-                    && bcrypt::verify(plaintext.as_bytes(), &t.token_hash).unwrap_or(false)
-            })
-            .cloned()
-            .ok_or_else(|| {
-                PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
-            })
+        let id = crate::repository::token_id_from_opaque(plaintext).ok_or_else(|| {
+            PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
+        })?;
+        let token = self.get_api_token_by_id(id).await?;
+        if bcrypt::verify(plaintext.as_bytes(), &token.token_hash).unwrap_or(false) {
+            Ok(token)
+        } else {
+            Err(PalaceError::new(
+                PalaceErrorCode::Unauthorized,
+                "invalid or revoked token",
+            ))
+        }
     }
 
     pub async fn revoke_api_token(&self, id: Uuid) -> PalaceResult<()> {
@@ -127,11 +206,36 @@ impl InMemoryRepository {
         Ok(())
     }
 
+    pub async fn revoke_api_token_with_audit(
+        &self,
+        id: Uuid,
+        event: &AuditEvent,
+    ) -> PalaceResult<()> {
+        self.revoke_api_token(id).await?;
+        self.record_audit_event(event).await
+    }
+    pub async fn get_api_token_by_id(&self, id: Uuid) -> PalaceResult<ApiToken> {
+        let map = self.tokens.read().await;
+        map.get(&id)
+            .filter(|token| token.revoked_at.is_none())
+            .cloned()
+            .ok_or_else(|| {
+                PalaceError::new(PalaceErrorCode::Unauthorized, "invalid or revoked token")
+            })
+    }
+
+    pub async fn touch_api_token(&self, id: Uuid) -> PalaceResult<()> {
+        let mut map = self.last_used.write().await;
+        map.insert(id, Utc::now());
+        Ok(())
+    }
+
     pub async fn list_api_tokens(&self, publisher_id: Uuid) -> PalaceResult<Vec<ApiToken>> {
         let map = self.tokens.read().await;
         Ok(map
             .values()
             .filter(|t| t.publisher_id == publisher_id)
+            .take(1_000)
             .cloned()
             .collect())
     }
@@ -155,9 +259,24 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
         versions
             .iter()
-            .max_by_key(|p| &p.version)
+            .max_by_key(|p| p.version.clone())
             .cloned()
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "no versions found"))
+    }
+    pub async fn get_package_publisher_id(&self, id: &str) -> PalaceResult<Option<Uuid>> {
+        let has_versions = self
+            .packages
+            .read()
+            .await
+            .get(id)
+            .is_some_and(|versions| !versions.is_empty());
+        if !has_versions {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        Ok(self.package_owners.read().await.get(id).copied())
     }
 
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
@@ -188,54 +307,244 @@ impl InMemoryRepository {
             .collect())
     }
 
+    pub async fn list_versions_page(
+        &self,
+        id: &str,
+        pagination: Pagination,
+    ) -> PalaceResult<(usize, Vec<VersionInfo>)> {
+        let map = self.packages.read().await;
+        let versions = map
+            .get(id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        let total = versions.len();
+        let mut versions = versions.iter().collect::<Vec<_>>();
+        versions.sort_by_key(|package| std::cmp::Reverse(package.created_at));
+        let (start, end) = pagination.bounds(total);
+        Ok((
+            total,
+            versions[start..end]
+                .iter()
+                .map(|package| VersionInfo {
+                    version: package.version.clone(),
+                    created_at: package.created_at,
+                    artifact_url: package.artifact_url.clone(),
+                    content_hash: package.trust.content_hash.clone(),
+                })
+                .collect(),
+        ))
+    }
+
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
-        let mut map = self.packages.write().await;
-        let versions = map.entry(package.id.clone()).or_default();
-        if versions.iter().any(|p| p.version == package.version) {
-            return Err(PalaceError::new(
-                PalaceErrorCode::Conflict,
-                format!(
-                    "version {} already exists for package {}",
-                    package.version, package.id
-                ),
-            ));
+        self.publish_verified_package(package, None, None).await
+    }
+
+    pub async fn publish_verified_package(
+        &self,
+        package: &Package,
+        artifact: Option<&crate::repository::VerifiedArtifact>,
+        actor_id: Option<Uuid>,
+    ) -> PalaceResult<Package> {
+        let actor_name = if let Some(actor_id) = actor_id {
+            Some(self.get_publisher_by_id(actor_id).await?.name)
+        } else {
+            None
+        };
+        if package.id.contains('/') {
+            let Some(actor_name) = actor_name.as_deref() else {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "publisher identity is required for namespaced packages",
+                ));
+            };
+            if crate::identity::namespace_of(&package.id) != actor_name {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "cannot publish under another publisher namespace",
+                ));
+            }
         }
-        versions.push(package.clone());
+        {
+            let mut owners = self.package_owners.write().await;
+            let mut map = self.packages.write().await;
+            let versions = map.entry(package.id.clone()).or_default();
+            if versions.iter().any(|p| p.version == package.version) {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Conflict,
+                    format!(
+                        "version {} already exists for package {}",
+                        package.version, package.id
+                    ),
+                ));
+            }
+            match actor_id {
+                Some(actor_id) => {
+                    if let Some(owner_id) = owners.get(&package.id) {
+                        if *owner_id != actor_id {
+                            return Err(PalaceError::new(
+                                PalaceErrorCode::Forbidden,
+                                "cannot publish another publisher's package",
+                            ));
+                        }
+                    } else if !versions.is_empty() {
+                        return Err(PalaceError::new(
+                            PalaceErrorCode::Forbidden,
+                            "package ownership is not assigned",
+                        ));
+                    }
+                }
+                None if !versions.is_empty() => {
+                    return Err(PalaceError::new(
+                        PalaceErrorCode::Forbidden,
+                        "publisher identity is required to publish another version",
+                    ));
+                }
+                None => {}
+            }
+            versions.push(package.clone());
+            if let Some(actor_id) = actor_id {
+                owners.insert(package.id.clone(), actor_id);
+            }
+        }
+
+        if let Some(artifact) = artifact {
+            self.artifacts.write().await.insert(
+                (package.id.clone(), package.version.clone()),
+                artifact.clone(),
+            );
+        }
+
+        self.record_audit_event(&AuditEvent {
+            id: Uuid::now_v7(),
+            event_type: "package.published".into(),
+            actor_id,
+            package_id: Some(package.id.clone()),
+            details: Some(serde_json::json!({"version": package.version})),
+            created_at: Utc::now(),
+        })
+        .await?;
+
         Ok(package.clone())
     }
 
-    pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {
-        let mut map = self.packages.write().await;
-        let versions = map
-            .get_mut(&package.id)
-            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        if let Some(existing) = versions.iter_mut().find(|p| p.version == package.version) {
-            *existing = package.clone();
-            Ok(package.clone())
-        } else {
-            Err(PalaceError::new(
-                PalaceErrorCode::NotFound,
-                "version not found",
-            ))
-        }
+    pub async fn has_verified_artifact(
+        &self,
+        id: &str,
+        version: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        Ok(self
+            .artifacts
+            .read()
+            .await
+            .get(&(id.to_string(), version.to_string()))
+            .is_some_and(|artifact| {
+                !require_signature
+                    || (artifact.signature.is_some() && artifact.public_key.is_some())
+            }))
     }
 
-    pub async fn delete_package(&self, id: &str, _publisher_id: Uuid) -> PalaceResult<()> {
-        let mut map = self.packages.write().await;
-        map.remove(id)
+    pub async fn has_verified_artifacts_for_all_versions(
+        &self,
+        id: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        let packages = self.packages.read().await;
+        let versions = packages
+            .get(id)
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        Ok(())
+        let artifacts = self.artifacts.read().await;
+        Ok(!versions.is_empty()
+            && versions.iter().all(|package| {
+                artifacts
+                    .get(&(id.to_string(), package.version.clone()))
+                    .is_some_and(|artifact| {
+                        !require_signature
+                            || (artifact.signature.is_some() && artifact.public_key.is_some())
+                    })
+            }))
+    }
+
+    pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {
+        let _ = package;
+        Err(PalaceError::new(
+            PalaceErrorCode::ImmutableVersion,
+            "published package versions cannot be updated",
+        ))
+    }
+    pub async fn delete_package(&self, id: &str, publisher_id: Uuid) -> PalaceResult<()> {
+        let mut map = self.packages.write().await;
+        let versions = map
+            .get_mut(id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        if versions.is_empty() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        for package in versions {
+            package.yanked = true;
+        }
+        drop(map);
+        self.record_audit_event(&AuditEvent {
+            id: Uuid::now_v7(),
+            event_type: "package.yanked".into(),
+            actor_id: Some(publisher_id),
+            package_id: Some(id.into()),
+            details: None,
+            created_at: Utc::now(),
+        })
+        .await
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
+        self.record_download_with_context(id, version, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub async fn record_download_with_context(
+        &self,
+        id: &str,
+        version: &str,
+        dedupe_key: Option<&str>,
+    ) -> PalaceResult<bool> {
+        if let Some(dedupe_key) = dedupe_key {
+            let mut dedup = self.download_dedup.write().await;
+            let cutoff = Utc::now() - Duration::hours(1);
+            dedup.retain(|_, timestamp| *timestamp >= cutoff);
+            let key = (id.to_string(), version.to_string(), dedupe_key.to_string());
+            if dedup.contains_key(&key) {
+                return Ok(false);
+            }
+
+            let mut map = self.packages.write().await;
+            let versions = map
+                .get_mut(id)
+                .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+            if let Some(pkg) = versions.iter_mut().find(|p| p.version == version) {
+                pkg.downloads += 1;
+                dedup.insert(key, Utc::now());
+                return Ok(true);
+            }
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package version not found",
+            ));
+        }
+
         let mut map = self.packages.write().await;
         let versions = map
             .get_mut(id)
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
         if let Some(pkg) = versions.iter_mut().find(|p| p.version == version) {
             pkg.downloads += 1;
+            return Ok(true);
         }
-        Ok(())
+        Err(PalaceError::new(
+            PalaceErrorCode::NotFound,
+            "package version not found",
+        ))
     }
 
     pub async fn search(
@@ -283,6 +592,7 @@ impl InMemoryRepository {
             .collect();
         cats.sort();
         cats.dedup();
+        cats.truncate(1_000);
         Ok(cats)
     }
 
@@ -295,23 +605,105 @@ impl InMemoryRepository {
             .collect();
         rts.sort();
         rts.dedup();
+        rts.truncate(1_000);
         Ok(rts)
     }
 
     pub async fn add_review(&self, review: &Review) -> PalaceResult<Review> {
         let mut map = self.reviews.write().await;
-        map.entry(review.package_id.clone())
-            .or_default()
-            .push(review.clone());
+        let reviews = map.entry(review.package_id.clone()).or_default();
+        if reviews
+            .iter()
+            .any(|existing| existing.reviewer_id == review.reviewer_id)
+        {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Conflict,
+                "publisher has already reviewed this package",
+            ));
+        }
+        reviews.push(review.clone());
         Ok(review.clone())
     }
 
     pub async fn list_reviews(&self, package_id: &str) -> PalaceResult<Vec<Review>> {
         let map = self.reviews.read().await;
-        Ok(map.get(package_id).cloned().unwrap_or_default())
+        Ok(map
+            .get(package_id)
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|review| review.status == ReviewStatus::Published)
+            .take(100)
+            .collect())
+    }
+
+    pub async fn moderate_review(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+    ) -> PalaceResult<Review> {
+        let mut map = self.reviews.write().await;
+        let review = map
+            .get_mut(package_id)
+            .into_iter()
+            .flat_map(|reviews| reviews.iter_mut())
+            .find(|review| review.id == review_id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
+        review.status = status;
+        review.moderated_by = Some(moderator_id);
+        review.moderation_reason = reason;
+        review.moderated_at = Some(chrono::Utc::now());
+        Ok(review.clone())
+    }
+
+    pub async fn moderate_review_with_audit(
+        &self,
+        package_id: &str,
+        review_id: Uuid,
+        status: ReviewStatus,
+        moderator_id: Uuid,
+        reason: Option<String>,
+        event: &AuditEvent,
+    ) -> PalaceResult<Review> {
+        let mut reviews = self.reviews.write().await;
+        let review = reviews
+            .get_mut(package_id)
+            .into_iter()
+            .flat_map(|items| items.iter_mut())
+            .find(|review| review.id == review_id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "review not found"))?;
+        review.status = status;
+        review.moderated_by = Some(moderator_id);
+        review.moderation_reason = reason;
+        review.moderated_at = Some(chrono::Utc::now());
+        let updated = review.clone();
+        self.audit.write().await.push(event.clone());
+        Ok(updated)
     }
 
     pub async fn record_trust_transition(&self, transition: &TrustTransition) -> PalaceResult<()> {
+        let level = TrustLevel::parse(&transition.to_level).ok_or_else(|| {
+            PalaceError::new(
+                PalaceErrorCode::ValidationFailed,
+                "invalid trust transition level",
+            )
+        })?;
+        let mut packages = self.packages.write().await;
+        let versions = packages
+            .get_mut(&transition.package_id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        if versions.is_empty() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        for package in versions {
+            package.trust.level = level.clone();
+        }
         let mut map = self.transitions.write().await;
         map.entry(transition.package_id.clone())
             .or_default()

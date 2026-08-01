@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
-/// A KUBER package — any publishable AI runtime component.
+/// A K-O Palace package — any publishable AI runtime component.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Package {
     pub id: String,
@@ -52,12 +52,18 @@ pub struct TrustInfo {
 /// Trust levels — from experimental to certified.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub enum TrustLevel {
+    #[serde(alias = "experimental")]
     Experimental,
+    #[serde(alias = "community")]
     Community,
+    #[serde(alias = "verified")]
     Verified,
+    #[serde(alias = "official")]
     Official,
+    #[serde(alias = "enterprise")]
     Enterprise,
     #[default]
+    #[serde(alias = "certified")]
     Certified,
 }
 
@@ -231,26 +237,77 @@ pub struct PackageListResponse {
     pub packages: Vec<Package>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct VersionListParams {
+    #[serde(default = "default_version_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_version_limit() -> usize {
+    crate::pagination::MAX_LIMIT
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionListResponse {
     pub total: usize,
     pub versions: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Review {
     pub id: Uuid,
     pub package_id: String,
     pub reviewer_id: Uuid,
     pub rating: i16,
     pub comment: Option<String>,
+    #[serde(default)]
+    pub status: ReviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderated_by: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderation_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub moderated_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ReviewStatus {
+    #[default]
+    Published,
+    Hidden,
+}
+
+impl ReviewStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Published => "published",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "published" => Some(Self::Published),
+            "hidden" => Some(Self::Hidden),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
 pub struct ReviewRequest {
     pub rating: i16,
     pub comment: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewModerationRequest {
+    pub status: ReviewStatus,
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -262,6 +319,24 @@ pub struct Publisher {
     pub website: Option<String>,
     pub role: Role,
     pub created_at: DateTime<Utc>,
+}
+
+/// Durable verification state for a publisher account.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PublisherVerification {
+    pub publisher_id: Uuid,
+    pub verified: bool,
+    pub verified_at: Option<DateTime<Utc>>,
+    pub verified_by: Option<Uuid>,
+    pub reason: Option<String>,
+}
+
+/// Request body for a moderator publisher-verification decision.
+#[derive(Debug, Deserialize)]
+pub struct PublisherVerificationRequest {
+    pub verified: bool,
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -321,6 +396,8 @@ pub struct ApiToken {
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -334,6 +411,11 @@ pub struct TrustTransition {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct TrustTransitionRequest {
+    pub level: TrustLevel,
+    pub reason: Option<String>,
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditEvent {
     pub id: Uuid,
@@ -350,11 +432,11 @@ pub struct Manifest {
     pub package_id: String,
     pub version: String,
     pub raw: String,
-    pub parsed: KuberManifest,
+    pub parsed: PalaceManifest,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct KuberManifest {
+pub struct PalaceManifest {
     pub package: ManifestPackage,
     #[serde(default)]
     pub capabilities: CapabilityInfo,
@@ -428,7 +510,6 @@ pub struct PublisherResponse {
     pub id: Uuid,
     pub name: String,
     pub display_name: String,
-    pub email: Option<String>,
     pub website: Option<String>,
     pub role: String,
     pub created_at: DateTime<Utc>,
@@ -440,7 +521,6 @@ impl From<Publisher> for PublisherResponse {
             id: p.id,
             name: p.name,
             display_name: p.display_name,
-            email: p.email,
             website: p.website,
             role: p.role.as_str().to_string(),
             created_at: p.created_at,
@@ -461,6 +541,8 @@ pub struct TokenCreateRequest {
     pub name: String,
     #[serde(default)]
     pub expires_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub scopes: Vec<String>,
 }
 
 /// Public token response (never includes token_hash).
@@ -471,6 +553,7 @@ pub struct TokenResponse {
     pub created_at: DateTime<Utc>,
     pub revoked_at: Option<DateTime<Utc>>,
     pub expires_at: Option<DateTime<Utc>>,
+    pub scopes: Vec<String>,
 }
 
 impl From<ApiToken> for TokenResponse {
@@ -481,6 +564,7 @@ impl From<ApiToken> for TokenResponse {
             created_at: t.created_at,
             revoked_at: t.revoked_at,
             expires_at: t.expires_at,
+            scopes: t.scopes,
         }
     }
 }

@@ -1,20 +1,20 @@
-# KUBER Manifest Specification v1.0
+# K-O Palace Manifest Specification v1.0
 
 ## Status: Draft
 
 ## Abstract
 
-KUBER is an open package specification for AI runtime components. It defines a standard manifest format, dependency model, trust metadata, and compatibility rules. Any runtime, tool, or platform can implement the KUBER specification. K-O Palace is the flagship registry and marketplace implementing this specification.
+K-O Palace is an open package specification for AI runtime components. It defines a standard manifest format, dependency model, trust metadata, and compatibility rules. Any runtime, tool, or platform can implement the K-O Palace specification. K-O Palace is the flagship registry and marketplace implementing this specification.
 
 ## Relationship to Pandora
 
-Pandora is the flagship runtime consuming KUBER packages. However, KUBER is runtime-agnostic. Other runtimes (Goose, Cline, Continue, Aider, Claude Code, Codex, OpenCode) can consume KUBER packages via integration adapters.
+Pandora is the flagship runtime consuming K-O Palace packages. However, K-O Palace is runtime-agnostic. Other runtimes (Goose, Cline, Continue, Aider, Claude Code, Codex, OpenCode) can consume K-O Palace packages via integration adapters.
 
 ---
 
 ## 1. Package Types
 
-A KUBER package is any of:
+A K-O Palace package is any of:
 
 | Type | Description |
 |------|-------------|
@@ -42,7 +42,7 @@ A KUBER package is any of:
 
 ## 2. Manifest Format
 
-Every KUBER package contains a `kuber.toml` manifest:
+Every K-O Palace package contains a `palace.toml` manifest:
 
 ```toml
 [package]
@@ -96,7 +96,7 @@ platforms = ["linux", "macos", "windows"]
 
 ## 4. Dependency Model
 
-KUBER packages depend on **capabilities**, not package names.
+K-O Palace packages depend on **capabilities**, not package names.
 
 ```toml
 [capabilities]
@@ -110,7 +110,7 @@ The runtime resolves: "Who provides `provider.inference`?" → finds installed g
 
 ## 5. Storage Backends
 
-KUBER separates the **registry** (metadata) from **distribution** (storage).
+K-O Palace separates the **registry** (metadata) from **distribution** (storage).
 
 ### Registry
 - Stores: package metadata, versions, manifests, trust info, reviews, downloads
@@ -135,7 +135,7 @@ Package files are stored in pluggable backends:
 
 ## 6. Registry API
 
-The KUBER Registry API is a REST API that any client can implement.
+The K-O Palace Registry API is a REST API that any client can implement.
 
 ### Endpoints
 
@@ -200,7 +200,7 @@ GET    /health                             # Health check
 ```
 Author creates package
   ↓
-pandora publish (or kuber publish)
+pandora publish (or palace publish)
   ↓
 Registry receives manifest + tarball
   ↓
@@ -280,10 +280,10 @@ Ready
 
 ## 10. Governance
 
-The KUBER specification is open source. Anyone can implement it.
+The K-O Palace specification is open source. Anyone can implement it.
 
 ```
-KUBER Specification (this document)
+K-O Palace Specification (this document)
   │
   ├── Manifest Spec
   ├── Registry API
@@ -306,4 +306,4 @@ KUBER Specification (this document)
 
 ## License
 
-The KUBER Manifest Specification is licensed under MIT. Anyone may implement it.
+The K-O Palace Manifest Specification is licensed under MIT. Anyone may implement it.
