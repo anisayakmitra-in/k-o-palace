@@ -540,15 +540,21 @@ impl PostgresRepository {
     }
 
     pub async fn get_package_publisher_id(&self, id: &str) -> PalaceResult<Option<Uuid>> {
-        let row = sqlx::query_as::<_, (Option<Uuid>,)>(
-            "SELECT publisher_id FROM packages WHERE id = $1 ORDER BY created_at DESC LIMIT 1",
+        let owners = sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT DISTINCT publisher_id FROM packages WHERE id = $1",
         )
         .bind(id)
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
-        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?
-        .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
-        Ok(row.0)
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        match owners.as_slice() {
+            [] => Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            )),
+            [owner_id] => Ok(*owner_id),
+            _ => Ok(None),
+        }
     }
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
         let row = sqlx::query_as::<_, PackageRow>(
@@ -585,7 +591,12 @@ impl PostgresRepository {
     }
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
-        self.publish_verified_package(package, None, None).await
+        let actor_id = match self.get_publisher_by_name(&package.trust.publisher).await {
+            Ok(publisher) => Some(publisher.id),
+            Err(error) if error.code == PalaceErrorCode::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        self.publish_verified_package(package, None, actor_id).await
     }
 
     pub async fn publish_verified_package(
@@ -594,6 +605,21 @@ impl PostgresRepository {
         artifact: Option<&crate::repository::VerifiedArtifact>,
         actor_id: Option<Uuid>,
     ) -> PalaceResult<Package> {
+        let actor_name = if let Some(actor_id) = actor_id {
+            Some(self.get_publisher_by_id(actor_id).await?.name)
+        } else {
+            None
+        };
+        if let Some(actor_name) = actor_name.as_deref() {
+            if package.id.contains('/') && crate::identity::namespace_of(&package.id) != actor_name
+            {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "cannot publish under another publisher namespace",
+                ));
+            }
+        }
+
         let mut transaction = self
             .pool
             .begin()
@@ -602,6 +628,41 @@ impl PostgresRepository {
         let tags_json = serde_json::to_value(&package.tags).unwrap_or_default();
         let caps_json = serde_json::to_value(&package.capabilities).unwrap_or_default();
         let compat_json = serde_json::to_value(&package.compatibility).unwrap_or_default();
+
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+            .bind(&package.id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+
+        let existing_versions = sqlx::query_as::<_, (String, Option<Uuid>)>(
+            "SELECT version, publisher_id FROM packages WHERE id = $1 FOR UPDATE",
+        )
+        .bind(&package.id)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+
+        if let Some(actor_id) = actor_id {
+            if existing_versions
+                .iter()
+                .any(|(_, owner_id)| *owner_id != Some(actor_id))
+            {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "cannot publish another publisher's package",
+                ));
+            }
+        } else if !existing_versions.is_empty()
+            && existing_versions
+                .iter()
+                .all(|(version, _)| version != &package.version)
+        {
+            return Err(PalaceError::new(
+                PalaceErrorCode::Forbidden,
+                "publisher identity is required to publish another version",
+            ));
+        }
 
         let result = sqlx::query(
             "INSERT INTO packages (id, name, version, kind, description, author, license, publisher_id, repository, artifact_url, homepage, tags, capabilities, compatibility, downloads, success_rate, yanked, deprecated, provenance, created_at, updated_at, trust_level, content_hash, public_key, signature)

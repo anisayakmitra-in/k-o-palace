@@ -126,6 +126,100 @@ async fn unauthenticated_publish_fails() {
 }
 
 #[tokio::test]
+async fn unnamespaced_package_cannot_be_taken_over() {
+    let state = test_state();
+    let (owner, owner_token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let (_other, other_token) = register_publisher(&state.repo, "other", "Other", None, None)
+        .await
+        .unwrap();
+
+    let mut package = valid_pkg("legacy.package");
+    package.trust.publisher = owner.name.clone();
+    let response = router(state.clone())
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {owner_token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    package.version = "1.1.0".into();
+    let response = router(state)
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {other_token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+#[tokio::test]
+async fn concurrent_unnamespaced_publications_have_one_owner() {
+    let state = test_state();
+    let (owner, owner_token) =
+        register_publisher(&state.repo, "concurrent-owner", "Owner", None, None)
+            .await
+            .unwrap();
+    let (other, other_token) =
+        register_publisher(&state.repo, "concurrent-other", "Other", None, None)
+            .await
+            .unwrap();
+
+    let owner_package = valid_pkg("concurrent.package");
+    let mut other_package = owner_package.clone();
+    other_package.version = "2.0.0".into();
+
+    let owner_request = Request::post("/api/v1/packages")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {owner_token}"))
+        .body(Body::from(serde_json::to_string(&owner_package).unwrap()))
+        .unwrap();
+    let other_request = Request::post("/api/v1/packages")
+        .header("content-type", "application/json")
+        .header("authorization", format!("Bearer {other_token}"))
+        .body(Body::from(serde_json::to_string(&other_package).unwrap()))
+        .unwrap();
+
+    let inspection_state = state.clone();
+    let (owner_result, other_result) = tokio::join!(
+        router(state.clone()).oneshot(owner_request),
+        router(state).oneshot(other_request),
+    );
+    let owner_response = owner_result.unwrap();
+    let other_response = other_result.unwrap();
+    let owner_created = owner_response.status() == StatusCode::CREATED;
+    let other_created = other_response.status() == StatusCode::CREATED;
+
+    assert_ne!(owner_created, other_created);
+    let expected_owner = if owner_created { owner.id } else { other.id };
+    assert_eq!(
+        inspection_state
+            .repo
+            .get_package_publisher_id("concurrent.package")
+            .await
+            .unwrap(),
+        Some(expected_owner)
+    );
+    assert_eq!(
+        inspection_state
+            .repo
+            .list_versions("concurrent.package")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+#[tokio::test]
 async fn authenticated_publish_succeeds() {
     let state = test_state();
     let (publisher, token) =

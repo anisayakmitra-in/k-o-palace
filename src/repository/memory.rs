@@ -20,6 +20,7 @@ pub struct InMemoryRepository {
     tokens: Arc<RwLock<HashMap<Uuid, ApiToken>>>,
     last_used: Arc<RwLock<HashMap<Uuid, chrono::DateTime<Utc>>>>,
     packages: Arc<RwLock<HashMap<String, Vec<Package>>>>,
+    package_owners: Arc<RwLock<HashMap<String, Uuid>>>,
     reviews: Arc<RwLock<HashMap<String, Vec<Review>>>>,
     transitions: Arc<RwLock<HashMap<String, Vec<TrustTransition>>>>,
     audit: Arc<RwLock<Vec<AuditEvent>>>,
@@ -236,12 +237,19 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "no versions found"))
     }
     pub async fn get_package_publisher_id(&self, id: &str) -> PalaceResult<Option<Uuid>> {
-        let package = self.get_package(id).await?;
-        let publishers = self.publishers.read().await;
-        Ok(publishers
-            .values()
-            .find(|p| p.name == package.trust.publisher)
-            .map(|p| p.id))
+        let has_versions = self
+            .packages
+            .read()
+            .await
+            .get(id)
+            .is_some_and(|versions| !versions.is_empty());
+        if !has_versions {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        Ok(self.package_owners.read().await.get(id).copied())
     }
 
     pub async fn get_package_version(&self, id: &str, version: &str) -> PalaceResult<Package> {
@@ -273,7 +281,12 @@ impl InMemoryRepository {
     }
 
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
-        self.publish_verified_package(package, None, None).await
+        let actor_id = match self.get_publisher_by_name(&package.trust.publisher).await {
+            Ok(publisher) => Some(publisher.id),
+            Err(error) if error.code == PalaceErrorCode::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        self.publish_verified_package(package, None, actor_id).await
     }
 
     pub async fn publish_verified_package(
@@ -282,7 +295,22 @@ impl InMemoryRepository {
         artifact: Option<&crate::repository::VerifiedArtifact>,
         actor_id: Option<Uuid>,
     ) -> PalaceResult<Package> {
+        let actor_name = if let Some(actor_id) = actor_id {
+            Some(self.get_publisher_by_id(actor_id).await?.name)
+        } else {
+            None
+        };
+        if let Some(actor_name) = actor_name.as_deref() {
+            if package.id.contains('/') && crate::identity::namespace_of(&package.id) != actor_name
+            {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "cannot publish under another publisher namespace",
+                ));
+            }
+        }
         {
+            let mut owners = self.package_owners.write().await;
             let mut map = self.packages.write().await;
             let versions = map.entry(package.id.clone()).or_default();
             if versions.iter().any(|p| p.version == package.version) {
@@ -294,7 +322,34 @@ impl InMemoryRepository {
                     ),
                 ));
             }
+            match actor_id {
+                Some(actor_id) => {
+                    if let Some(owner_id) = owners.get(&package.id) {
+                        if *owner_id != actor_id {
+                            return Err(PalaceError::new(
+                                PalaceErrorCode::Forbidden,
+                                "cannot publish another publisher's package",
+                            ));
+                        }
+                    } else if !versions.is_empty() {
+                        return Err(PalaceError::new(
+                            PalaceErrorCode::Forbidden,
+                            "package ownership is not assigned",
+                        ));
+                    }
+                }
+                None if !versions.is_empty() => {
+                    return Err(PalaceError::new(
+                        PalaceErrorCode::Forbidden,
+                        "publisher identity is required to publish another version",
+                    ));
+                }
+                None => {}
+            }
             versions.push(package.clone());
+            if let Some(actor_id) = actor_id {
+                owners.insert(package.id.clone(), actor_id);
+            }
         }
 
         if let Some(artifact) = artifact {

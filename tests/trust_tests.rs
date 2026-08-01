@@ -137,6 +137,15 @@ async fn trust_transition_updates_all_versions_in_memory() {
         created_at: Utc::now(),
     };
     repo.create_publisher(&publisher).await.unwrap();
+    repo.set_publisher_verification(&PublisherVerification {
+        publisher_id: publisher.id,
+        verified: true,
+        verified_at: Some(Utc::now()),
+        verified_by: Some(publisher.id),
+        reason: Some("test publisher".into()),
+    })
+    .await
+    .unwrap();
 
     let mut first = Package {
         id: "versions.gene".into(),
@@ -151,7 +160,7 @@ async fn trust_transition_updates_all_versions_in_memory() {
             signature: None,
             public_key: None,
             content_hash: None,
-            publisher: "test".into(),
+            publisher: "mod".into(),
         },
         capabilities: Default::default(),
         downloads: 0,
@@ -203,7 +212,6 @@ async fn trust_transition_updates_all_versions_in_memory() {
         TrustLevel::Verified
     );
 }
-
 #[tokio::test]
 async fn server_assigned_trust_requires_verified_publisher() {
     use k_o_palace::models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind};

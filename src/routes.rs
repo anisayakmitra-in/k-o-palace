@@ -396,11 +396,26 @@ async fn publish_package(
     if pkg.id.contains('/') {
         pkg.id = crate::identity::normalize_id(&pkg.id)?;
         let namespace = crate::identity::namespace_of(&pkg.id);
-        if namespace != auth.publisher.name && !auth.can_administer() {
+        if namespace != auth.publisher.name {
             return Err(PalaceError::new(
                 PalaceErrorCode::Forbidden,
                 "cannot publish under another publisher namespace",
             ));
+        }
+    } else {
+        let existing = match state.repo.get_package(&pkg.id).await {
+            Ok(_) => true,
+            Err(error) if error.code == PalaceErrorCode::NotFound => false,
+            Err(error) => return Err(error),
+        };
+        if existing {
+            let owner_id = state.repo.get_package_publisher_id(&pkg.id).await?;
+            if owner_id != Some(auth.publisher.id) {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::Forbidden,
+                    "legacy package ownership must be assigned before publishing",
+                ));
+            }
         }
     }
 
