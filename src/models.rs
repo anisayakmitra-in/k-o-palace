@@ -237,6 +237,18 @@ pub struct PackageListResponse {
     pub packages: Vec<Package>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct VersionListParams {
+    #[serde(default = "default_version_limit")]
+    pub limit: usize,
+    #[serde(default)]
+    pub offset: usize,
+}
+
+fn default_version_limit() -> usize {
+    crate::pagination::MAX_LIMIT
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct VersionListResponse {
     pub total: usize,

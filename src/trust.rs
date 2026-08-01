@@ -135,7 +135,7 @@ async fn transition_trust_inner(
     package_id: &str,
     new_level: TrustLevel,
     reason: Option<String>,
-    _require_signatures: bool,
+    require_signatures: bool,
     require_publisher_identity: bool,
 ) -> PalaceResult<TrustTransition> {
     if !actor.can_moderate() && !actor.can_administer() {
@@ -171,10 +171,20 @@ async fn transition_trust_inner(
                 "publisher identity is required for server-assigned trust levels",
             ));
         }
-        return Err(PalaceError::new(
-            PalaceErrorCode::TrustTransitionDenied,
-            "server-recorded artifact verification evidence is required for server-assigned trust levels",
-        ));
+        if !repo
+            .has_verified_artifacts_for_all_versions(package_id, require_signatures)
+            .await?
+        {
+            let message = if require_signatures {
+                "server-recorded artifact and signature verification evidence is required for every package version"
+            } else {
+                "server-recorded artifact verification evidence is required for every package version"
+            };
+            return Err(PalaceError::new(
+                PalaceErrorCode::TrustTransitionDenied,
+                message,
+            ));
+        }
     }
     if !can_transition(current.clone(), new_level.clone()) {
         return Err(PalaceError::new(

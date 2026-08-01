@@ -12,7 +12,7 @@ use crate::{
         PublisherRegisterResponse, PublisherResponse, PublisherVerification,
         PublisherVerificationRequest, Review, ReviewModerationRequest, ReviewRequest, ReviewStatus,
         SearchParams, TokenCreateRequest, TokenCreateResponse, TokenResponse,
-        TrustTransitionRequest, VersionListResponse,
+        TrustTransitionRequest, VersionListParams, VersionListResponse,
     },
     pagination::Pagination,
     repository::PackageFilters,
@@ -33,11 +33,14 @@ use axum::{
     middleware::Next,
     response::Response,
     routing::{delete, get, patch, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use chrono::Utc;
 use std::time::Duration;
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     limit::RequestBodyLimitLayer,
@@ -46,19 +49,29 @@ use tower_http::{
 };
 use uuid::Uuid;
 
-fn rate_limit_key(
+fn anonymous_client_ip(
     headers: &axum::http::HeaderMap,
-    namespace: &str,
-    trust_forwarded: bool,
-) -> String {
-    let identity = trust_forwarded
-        .then(|| {
-            headers
-                .get("x-forwarded-for")
-                .and_then(|value| value.to_str().ok())
-                .map(|value| format!("forwarded:{value}"))
-        })
-        .flatten()
+    peer_ip: Option<IpAddr>,
+    security: &crate::config::SecurityConfig,
+) -> Option<IpAddr> {
+    let peer_ip = peer_ip?;
+    if !security.trust_forwarded_headers || !security.trusted_proxy_ips.contains(&peer_ip) {
+        return Some(peer_ip);
+    }
+
+    headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<IpAddr>().ok())
+        .or(Some(peer_ip))
+}
+
+fn anonymous_rate_limit_key(client_ip: Option<IpAddr>, namespace: &str) -> String {
+    let identity = client_ip
+        .map(|client_ip| format!("client:{client_ip}"))
         .unwrap_or_else(|| "anonymous".into());
     format!(
         "{namespace}:{}",
@@ -87,10 +100,12 @@ async fn read_rate_limit_middleware(
     if request.method() == axum::http::Method::GET
         && (path == "/api/v1" || path.starts_with("/api/v1/"))
     {
-        let identity = connect_info
-            .map(|ConnectInfo(peer)| format!("peer:{}", peer.ip()))
-            .unwrap_or_else(|| "anonymous".into());
-        let key = format!("read:{}", crate::security::sha256_hex(identity.as_bytes()));
+        let client_ip = anonymous_client_ip(
+            request.headers(),
+            connect_info.map(|ConnectInfo(peer)| peer.ip()),
+            &state.config.security,
+        );
+        let key = anonymous_rate_limit_key(client_ip, "read");
         if let Err(retry) = state.rate_limiters.read.check(&key).await {
             return Err(PalaceError::new(
                 PalaceErrorCode::RateLimited,
@@ -103,8 +118,8 @@ async fn read_rate_limit_middleware(
 }
 
 #[cfg(feature = "reqwest")]
-fn download_dedupe_key(headers: &axum::http::HeaderMap, trust_forwarded: bool) -> String {
-    let rate_key = rate_limit_key(headers, "download", trust_forwarded);
+fn download_dedupe_key(headers: &axum::http::HeaderMap, peer_ip: Option<IpAddr>) -> String {
+    let rate_key = anonymous_rate_limit_key(peer_ip, "download");
     let user_agent = headers
         .get(axum::http::header::USER_AGENT)
         .and_then(|value| value.to_str().ok())
@@ -244,14 +259,16 @@ async fn get_package(
 async fn resolve_package(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(id): Path<String>,
     Query(params): Query<ResolveOptions>,
 ) -> PalaceResult<Json<ResolutionResponse>> {
-    let rl_key = rate_limit_key(
+    let client_ip = anonymous_client_ip(
         &headers,
-        "resolve",
-        state.config.security.trust_forwarded_headers,
+        connect_info.map(|Extension(ConnectInfo(peer))| peer.ip()),
+        &state.config.security,
     );
+    let rl_key = anonymous_rate_limit_key(client_ip, "resolve");
     if let Err(retry) = state.rate_limiters.resolve.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
@@ -319,14 +336,15 @@ async fn resolve_package(
 async fn list_versions(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(params): Query<VersionListParams>,
 ) -> PalaceResult<Json<VersionListResponse>> {
-    let versions = state.repo.list_versions(&id).await?;
+    let pagination = Pagination::new(params.limit, params.offset)?;
+    let (total, versions) = state.repo.list_versions_page(&id, pagination).await?;
     Ok(Json(VersionListResponse {
-        total: versions.len(),
+        total,
         versions: versions
             .into_iter()
-            .take(crate::pagination::MAX_LIMIT)
-            .map(|v| v.version)
+            .map(|version| version.version)
             .collect(),
     }))
 }
@@ -341,14 +359,15 @@ async fn get_version(
 async fn search_packages(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Query(params): Query<SearchParams>,
 ) -> PalaceResult<Json<PackageListResponse>> {
-    // Rate limit
-    let rl_key = rate_limit_key(
+    let client_ip = anonymous_client_ip(
         &headers,
-        "search",
-        state.config.security.trust_forwarded_headers,
+        connect_info.map(|Extension(ConnectInfo(peer))| peer.ip()),
+        &state.config.security,
     );
+    let rl_key = anonymous_rate_limit_key(client_ip, "search");
     if let Err(retry) = state.rate_limiters.search.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
@@ -597,14 +616,15 @@ async fn transition_package_trust(
 async fn download_package(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Path(id): Path<String>,
 ) -> PalaceResult<Response> {
-    // Rate limit
-    let rl_key = rate_limit_key(
+    let client_ip = anonymous_client_ip(
         &headers,
-        "download",
-        state.config.security.trust_forwarded_headers,
+        connect_info.map(|Extension(ConnectInfo(peer))| peer.ip()),
+        &state.config.security,
     );
+    let rl_key = anonymous_rate_limit_key(client_ip, "download");
     if let Err(retry) = state.rate_limiters.download.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,
@@ -613,7 +633,7 @@ async fn download_package(
     }
 
     #[cfg(feature = "reqwest")]
-    let dedupe_key = download_dedupe_key(&headers, state.config.security.trust_forwarded_headers);
+    let dedupe_key = download_dedupe_key(&headers, client_ip);
     let package = state.repo.get_package(&id).await?;
     if package.yanked {
         return Err(PalaceError::new(
@@ -634,10 +654,10 @@ async fn download_package(
     #[cfg(not(feature = "reqwest"))]
     {
         let _ = artifact_url;
-        return Err(PalaceError::new(
+        Err(PalaceError::new(
             PalaceErrorCode::NotImplemented,
             "reqwest feature not enabled",
-        ));
+        ))
     }
 
     #[cfg(feature = "reqwest")]
@@ -818,6 +838,7 @@ async fn authenticate_header(
 async fn register_publisher_handler(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
+    connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
     Json(req): Json<PublisherRegisterRequest>,
 ) -> PalaceResult<(StatusCode, Json<PublisherRegisterResponse>)> {
     if !state.config.security.allow_public_registration {
@@ -826,11 +847,12 @@ async fn register_publisher_handler(
             "public publisher registration is disabled; provision publishers through an operator",
         ));
     }
-    let rl_key = rate_limit_key(
+    let client_ip = anonymous_client_ip(
         &headers,
-        "registration",
-        state.config.security.trust_forwarded_headers,
+        connect_info.map(|Extension(ConnectInfo(peer))| peer.ip()),
+        &state.config.security,
     );
+    let rl_key = anonymous_rate_limit_key(client_ip, "registration");
     if let Err(retry) = state.rate_limiters.auth.check(&rl_key).await {
         return Err(PalaceError::new(
             PalaceErrorCode::RateLimited,

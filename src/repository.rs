@@ -195,6 +195,14 @@ impl PackageRepository {
         dispatch!(self, list_versions, id)
     }
 
+    pub async fn list_versions_page(
+        &self,
+        id: &str,
+        pagination: Pagination,
+    ) -> PalaceResult<(usize, Vec<VersionInfo>)> {
+        dispatch!(self, list_versions_page, id, pagination)
+    }
+
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
         dispatch!(self, publish_package, package)
     }
@@ -206,6 +214,28 @@ impl PackageRepository {
         actor_id: Option<Uuid>,
     ) -> PalaceResult<Package> {
         dispatch!(self, publish_verified_package, package, artifact, actor_id)
+    }
+
+    pub async fn has_verified_artifact(
+        &self,
+        id: &str,
+        version: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        dispatch!(self, has_verified_artifact, id, version, require_signature)
+    }
+
+    pub async fn has_verified_artifacts_for_all_versions(
+        &self,
+        id: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        dispatch!(
+            self,
+            has_verified_artifacts_for_all_versions,
+            id,
+            require_signature
+        )
     }
 
     pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {

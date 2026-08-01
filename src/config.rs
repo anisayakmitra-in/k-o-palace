@@ -1,6 +1,6 @@
 //! Application configuration.
 
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 
 /// Application configuration loaded from environment and files.
 #[derive(Debug, Clone)]
@@ -63,6 +63,7 @@ pub struct SecurityConfig {
     pub max_body_bytes: usize,
     pub request_timeout_secs: u64,
     pub trust_forwarded_headers: bool,
+    pub trusted_proxy_ips: Vec<IpAddr>,
     pub allow_public_registration: bool,
     pub behind_tls_proxy: bool,
     pub replica_count: usize,
@@ -112,6 +113,7 @@ impl Default for PalaceConfig {
                 max_body_bytes: 16 * 1024 * 1024,
                 request_timeout_secs: 30,
                 trust_forwarded_headers: false,
+                trusted_proxy_ips: vec![],
                 allow_public_registration: false,
                 behind_tls_proxy: false,
                 replica_count: 1,
@@ -142,8 +144,8 @@ impl StorageBackend {
     }
 }
 impl PalaceConfig {
-    /// Load configuration from environment variables.
-    pub fn from_env() -> Self {
+    /// Load and validate configuration from environment variables.
+    pub fn try_from_env() -> Result<Self, String> {
         let mut cfg = Self::default();
         if let Ok(addr) = std::env::var("PALACE_BIND") {
             if let Ok(socket) = addr.parse() {
@@ -172,9 +174,8 @@ impl PalaceConfig {
                 .collect();
         }
         if let Ok(backend) = std::env::var("PALACE_STORAGE_BACKEND") {
-            if let Some(value) = StorageBackend::parse(&backend) {
-                cfg.storage.backend = value;
-            }
+            cfg.storage.backend = StorageBackend::parse(&backend)
+                .ok_or_else(|| format!("unknown PALACE_STORAGE_BACKEND value '{backend}'"))?;
         }
         if let Ok(path) = std::env::var("PALACE_STORAGE_LOCAL_PATH") {
             cfg.storage.local_path = Some(path);
@@ -242,6 +243,18 @@ impl PalaceConfig {
             cfg.security.trust_forwarded_headers =
                 value == "1" || value.eq_ignore_ascii_case("true");
         }
+        if let Ok(value) = std::env::var("PALACE_TRUSTED_PROXY_IPS") {
+            cfg.security.trusted_proxy_ips = value
+                .split(',')
+                .map(str::trim)
+                .filter(|address| !address.is_empty())
+                .map(|address| {
+                    address.parse::<IpAddr>().map_err(|_| {
+                        format!("invalid PALACE_TRUSTED_PROXY_IPS address '{address}'")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+        }
         if let Ok(value) = std::env::var("PALACE_BEHIND_TLS_PROXY") {
             cfg.security.behind_tls_proxy = value == "1" || value.eq_ignore_ascii_case("true");
         }
@@ -259,13 +272,22 @@ impl PalaceConfig {
             cfg.security.require_https_in_production =
                 value == "1" || value.eq_ignore_ascii_case("true");
         }
-        cfg
+        Ok(cfg)
+    }
+
+    /// Load configuration from the environment, panicking when it is invalid.
+    #[deprecated(note = "use PalaceConfig::try_from_env to handle invalid configuration")]
+    pub fn from_env() -> Self {
+        Self::try_from_env().unwrap_or_else(|error| panic!("invalid Palace configuration: {error}"))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::PalaceConfig;
+    use std::sync::Mutex;
+
+    static ENV_MUTEX: Mutex<()> = Mutex::new(());
 
     #[test]
     fn startup_security_defaults_are_single_replica_without_tls_proxy() {
@@ -277,14 +299,77 @@ mod tests {
 
     #[test]
     fn startup_security_settings_are_loaded_from_environment() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
         std::env::set_var("PALACE_BEHIND_TLS_PROXY", "true");
         std::env::set_var("PALACE_REPLICA_COUNT", "3");
 
-        let config = PalaceConfig::from_env();
+        let config = PalaceConfig::try_from_env().unwrap();
 
         std::env::remove_var("PALACE_BEHIND_TLS_PROXY");
         std::env::remove_var("PALACE_REPLICA_COUNT");
         assert!(config.security.behind_tls_proxy);
         assert_eq!(config.security.replica_count, 3);
+    }
+
+    #[test]
+    fn trusted_proxy_ips_are_loaded_as_exact_addresses() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_TRUST_PROXY_HEADERS", "true");
+        std::env::set_var("PALACE_TRUSTED_PROXY_IPS", "127.0.0.1, 2001:db8::1");
+
+        let config = PalaceConfig::try_from_env().unwrap();
+
+        std::env::remove_var("PALACE_TRUST_PROXY_HEADERS");
+        std::env::remove_var("PALACE_TRUSTED_PROXY_IPS");
+        assert!(config.security.trust_forwarded_headers);
+        assert_eq!(
+            config.security.trusted_proxy_ips,
+            vec![
+                "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+                "2001:db8::1".parse::<std::net::IpAddr>().unwrap(),
+            ]
+        );
+    }
+
+    #[test]
+    fn invalid_trusted_proxy_ip_is_rejected() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_TRUSTED_PROXY_IPS", "127.0.0.1,not-an-ip");
+
+        let result = PalaceConfig::try_from_env();
+
+        std::env::remove_var("PALACE_TRUSTED_PROXY_IPS");
+        assert_eq!(
+            result.unwrap_err(),
+            "invalid PALACE_TRUSTED_PROXY_IPS address 'not-an-ip'"
+        );
+    }
+
+    #[test]
+    fn unknown_storage_backend_is_rejected() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::set_var("PALACE_STORAGE_BACKEND", "unknown");
+
+        let result = PalaceConfig::try_from_env();
+
+        std::env::remove_var("PALACE_STORAGE_BACKEND");
+        assert_eq!(
+            result.unwrap_err(),
+            "unknown PALACE_STORAGE_BACKEND value 'unknown'"
+        );
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn compatibility_from_env_returns_self_and_panics_on_invalid_config() {
+        let _env_guard = ENV_MUTEX.lock().unwrap();
+        std::env::remove_var("PALACE_STORAGE_BACKEND");
+        let config: PalaceConfig = PalaceConfig::from_env();
+        assert_eq!(config.storage.backend, super::StorageBackend::Local);
+
+        std::env::set_var("PALACE_STORAGE_BACKEND", "unknown");
+        let result = std::panic::catch_unwind(PalaceConfig::from_env);
+        std::env::remove_var("PALACE_STORAGE_BACKEND");
+        assert!(result.is_err());
     }
 }

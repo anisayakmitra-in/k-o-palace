@@ -15,7 +15,10 @@ use k_o_palace::{
     },
     routes::router,
 };
-use std::{net::SocketAddr, sync::Arc};
+use std::{
+    net::{IpAddr, SocketAddr},
+    sync::Arc,
+};
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -24,9 +27,10 @@ fn test_state() -> AppState {
     AppState::in_memory(config)
 }
 
-fn read_limited_state(trust_forwarded_headers: bool) -> AppState {
+fn read_limited_state(trust_forwarded_headers: bool, trusted_proxy_ips: Vec<IpAddr>) -> AppState {
     let mut config = PalaceConfig::default();
     config.security.trust_forwarded_headers = trust_forwarded_headers;
+    config.security.trusted_proxy_ips = trusted_proxy_ips;
     let mut state = AppState::in_memory(config);
     state.rate_limiters = Arc::new(RateLimiters {
         publish: RateLimiter::new(10),
@@ -36,6 +40,23 @@ fn read_limited_state(trust_forwarded_headers: bool) -> AppState {
         auth: RateLimiter::new(10),
         resolve: RateLimiter::new(10),
         read: RateLimiter::new(1),
+    });
+    state
+}
+
+fn endpoint_limited_state() -> AppState {
+    let mut config = PalaceConfig::default();
+    config.security.trust_forwarded_headers = true;
+    config.security.allow_public_registration = true;
+    let mut state = AppState::in_memory(config);
+    state.rate_limiters = Arc::new(RateLimiters {
+        publish: RateLimiter::new(10),
+        search: RateLimiter::new(1),
+        download: RateLimiter::new(1),
+        review: RateLimiter::new(10),
+        auth: RateLimiter::new(1),
+        resolve: RateLimiter::new(1),
+        read: RateLimiter::new(100),
     });
     state
 }
@@ -790,7 +811,7 @@ async fn publisher_cannot_publish_under_another_namespace() {
 
 #[tokio::test]
 async fn untrusted_peer_cannot_rotate_forwarded_ips_to_bypass_public_read_limit() {
-    let app = router(read_limited_state(true));
+    let app = router(read_limited_state(true, vec![]));
     let peer: SocketAddr = "203.0.113.10:41000".parse().unwrap();
 
     let mut first = Request::get("/api/v1/packages")
@@ -807,6 +828,228 @@ async fn untrusted_peer_cannot_rotate_forwarded_ips_to_bypass_public_read_limit(
         .unwrap();
     second.extensions_mut().insert(ConnectInfo(peer));
     let second = app.oneshot(second).await.unwrap();
+    assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn disabled_proxy_header_trust_ignores_forwarded_ips_for_allowlisted_peer() {
+    let proxy_ip: IpAddr = "203.0.113.13".parse().unwrap();
+    let app = router(read_limited_state(false, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41003);
+
+    let mut first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1")
+        .body(Body::empty())
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut second = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.2")
+        .body(Body::empty())
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(second).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_uses_only_first_forwarded_address_for_public_read_limit() {
+    let proxy_ip: IpAddr = "203.0.113.11".parse().unwrap();
+    let app = router(read_limited_state(true, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41001);
+
+    let mut first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1, 192.0.2.10")
+        .body(Body::empty())
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut second = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.2, 198.51.100.1")
+        .body(Body::empty())
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(second).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut repeated_first = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.2, 192.0.2.200")
+        .body(Body::empty())
+        .unwrap();
+    repeated_first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(repeated_first).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_invalid_or_missing_forwarded_address_uses_direct_peer() {
+    let proxy_ip: IpAddr = "203.0.113.12".parse().unwrap();
+    let app = router(read_limited_state(true, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41002);
+
+    let mut invalid = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "not-an-ip")
+        .body(Body::empty())
+        .unwrap();
+    invalid.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(invalid).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut missing = Request::get("/api/v1/packages")
+        .body(Body::empty())
+        .unwrap();
+    missing.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(missing).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn version_listing_applies_limit_and_offset_at_repository_boundary() {
+    let state = test_state();
+    let (publisher, _) =
+        register_publisher(&state.repo, "version-owner", "Version Owner", None, None)
+            .await
+            .unwrap();
+    let base = Utc::now();
+    for (index, version) in ["1.0.0", "2.0.0", "3.0.0"].into_iter().enumerate() {
+        let mut package = valid_pkg("version-page");
+        package.version = version.into();
+        package.trust.publisher = publisher.name.clone();
+        package.created_at = base + chrono::Duration::seconds(index as i64);
+        state
+            .repo
+            .publish_verified_package(&package, None, Some(publisher.id))
+            .await
+            .unwrap();
+    }
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/version-page/versions?limit=1&offset=1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: serde_json::Value = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body, serde_json::json!({"total": 3, "versions": ["2.0.0"]}));
+}
+
+#[tokio::test]
+async fn endpoint_rate_limits_ignore_forwarded_ips_for_same_peer() {
+    let state = endpoint_limited_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("rate-limit-target"))
+        .await
+        .unwrap();
+    let app = router(state);
+    let peer: SocketAddr = "203.0.113.20:42000".parse().unwrap();
+
+    for path in [
+        "/api/v1/search?q=test",
+        "/api/v1/packages/rate-limit-target/resolve",
+        "/api/v1/packages/rate-limit-target/download",
+    ] {
+        let mut first = Request::get(path)
+            .header("x-forwarded-for", "198.51.100.1")
+            .body(Body::empty())
+            .unwrap();
+        first.extensions_mut().insert(ConnectInfo(peer));
+        let first = app.clone().oneshot(first).await.unwrap();
+        assert_ne!(first.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
+
+        let mut second = Request::get(path)
+            .header("x-forwarded-for", "198.51.100.2")
+            .body(Body::empty())
+            .unwrap();
+        second.extensions_mut().insert(ConnectInfo(peer));
+        let second = app.clone().oneshot(second).await.unwrap();
+        assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn registration_rate_limit_ignores_forwarded_ips_for_same_peer() {
+    let app = router(endpoint_limited_state());
+    let peer: SocketAddr = "203.0.113.30:43000".parse().unwrap();
+
+    let mut first = Request::post("/api/v1/publishers")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "198.51.100.1")
+        .body(Body::from(
+            serde_json::json!({"name": "rate-one", "display_name": "Rate One"}).to_string(),
+        ))
+        .unwrap();
+    first.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(first).await.unwrap().status(),
+        StatusCode::CREATED
+    );
+
+    let mut second = Request::post("/api/v1/publishers")
+        .header("content-type", "application/json")
+        .header("x-forwarded-for", "198.51.100.2")
+        .body(Body::from(
+            serde_json::json!({"name": "rate-two", "display_name": "Rate Two"}).to_string(),
+        ))
+        .unwrap();
+    second.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(second).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn missing_connect_info_uses_shared_anonymous_rate_limit_bucket() {
+    let app = router(endpoint_limited_state());
+    let first = app
+        .clone()
+        .oneshot(
+            Request::get("/api/v1/search?q=first")
+                .header("x-forwarded-for", "198.51.100.1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.status(), StatusCode::OK);
+
+    let second = app
+        .oneshot(
+            Request::get("/api/v1/search?q=second")
+                .header("x-forwarded-for", "198.51.100.2")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(second.status(), StatusCode::TOO_MANY_REQUESTS);
 }
 

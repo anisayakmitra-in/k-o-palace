@@ -450,3 +450,210 @@ async fn server_assigned_trust_rejects_client_supplied_signature_metadata() {
     );
     assert!(rejected.message.contains("server-recorded artifact"));
 }
+#[tokio::test]
+async fn server_assigned_trust_requires_durable_evidence_for_every_version() {
+    use k_o_palace::models::{CapabilityInfo, CompatibilityInfo, Package, PackageKind};
+    use k_o_palace::repository::{memory::InMemoryRepository, PackageRepository, VerifiedArtifact};
+
+    let repo = PackageRepository::Memory(InMemoryRepository::new());
+    let owner = Publisher {
+        id: Uuid::new_v4(),
+        name: "artifact-owner".into(),
+        display_name: "Artifact Owner".into(),
+        email: None,
+        website: None,
+        role: Role::Publisher,
+        created_at: Utc::now(),
+    };
+    let moderator = Publisher {
+        id: Uuid::new_v4(),
+        name: "artifact-moderator".into(),
+        display_name: "Artifact Moderator".into(),
+        email: None,
+        website: None,
+        role: Role::Moderator,
+        created_at: Utc::now(),
+    };
+    repo.create_publisher(&owner).await.unwrap();
+    repo.create_publisher(&moderator).await.unwrap();
+    repo.set_publisher_verification(&PublisherVerification {
+        publisher_id: owner.id,
+        verified: true,
+        verified_at: Some(Utc::now()),
+        verified_by: Some(moderator.id),
+        reason: Some("publisher identity verified".into()),
+    })
+    .await
+    .unwrap();
+
+    let mut package = Package {
+        id: "artifact-evidence.gene".into(),
+        name: "Artifact Evidence".into(),
+        version: "1.0.0".into(),
+        kind: PackageKind::Gene,
+        description: "durably verified artifact".into(),
+        author: owner.name.clone(),
+        license: "MIT".into(),
+        trust: TrustInfo {
+            level: TrustLevel::Experimental,
+            signature: None,
+            public_key: None,
+            content_hash: Some("sha256:verified".into()),
+            publisher: owner.name.clone(),
+        },
+        capabilities: CapabilityInfo::default(),
+        downloads: 0,
+        success_rate: 0.0,
+        compatibility: CompatibilityInfo::default(),
+        repository: None,
+        artifact_url: Some("https://example.com/v1.tar.gz".into()),
+        homepage: None,
+        tags: vec![],
+        yanked: false,
+        deprecated: None,
+        provenance: None,
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    let artifact = VerifiedArtifact {
+        url: package.artifact_url.clone().unwrap(),
+        content_type: Some("application/gzip".into()),
+        size_bytes: 128,
+        content_hash: "sha256:verified".into(),
+        signature: None,
+        public_key: None,
+    };
+    repo.publish_verified_package(&package, Some(&artifact), Some(owner.id))
+        .await
+        .unwrap();
+
+    package.version = "2.0.0".into();
+    package.artifact_url = None;
+    package.trust.content_hash = None;
+    package.created_at += chrono::Duration::seconds(1);
+    repo.publish_verified_package(&package, None, Some(owner.id))
+        .await
+        .unwrap();
+
+    let context = AuthContext {
+        publisher: moderator,
+        token_id: Uuid::new_v4(),
+        scopes: vec!["moderation:write".into()],
+    };
+    let rejected = transition_trust(
+        &repo,
+        &context,
+        &package.id,
+        TrustLevel::Verified,
+        Some("old evidence is insufficient".into()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+
+    package.version = "3.0.0".into();
+    package.artifact_url = Some("https://example.com/v3.tar.gz".into());
+    package.trust.content_hash = Some("sha256:verified-v3".into());
+    package.created_at += chrono::Duration::seconds(1);
+    let current_artifact = VerifiedArtifact {
+        url: package.artifact_url.clone().unwrap(),
+        content_type: Some("application/gzip".into()),
+        size_bytes: 256,
+        content_hash: "sha256:verified-v3".into(),
+        signature: None,
+        public_key: None,
+    };
+    repo.publish_verified_package(&package, Some(&current_artifact), Some(owner.id))
+        .await
+        .unwrap();
+
+    let rejected = transition_trust(
+        &repo,
+        &context,
+        &package.id,
+        TrustLevel::Verified,
+        Some("mixed artifact history is insufficient".into()),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+
+    let mut signature_history = package.clone();
+    signature_history.id = "signature-history.gene".into();
+    signature_history.name = "Signature History".into();
+    for (index, signed) in [false, true].into_iter().enumerate() {
+        signature_history.version = format!("{}.0.0", index + 1);
+        signature_history.created_at += chrono::Duration::seconds(1);
+        signature_history.artifact_url = Some(format!(
+            "https://example.com/signature-history-{}.tar.gz",
+            index + 1
+        ));
+        signature_history.trust.content_hash = Some(format!("sha256:signed-{index}"));
+        let artifact = VerifiedArtifact {
+            url: signature_history.artifact_url.clone().unwrap(),
+            content_type: Some("application/gzip".into()),
+            size_bytes: 256,
+            content_hash: signature_history.trust.content_hash.clone().unwrap(),
+            signature: signed.then(|| "verified-signature".into()),
+            public_key: signed.then(|| "verified-public-key".into()),
+        };
+        repo.publish_verified_package(&signature_history, Some(&artifact), Some(owner.id))
+            .await
+            .unwrap();
+    }
+
+    let signature_rejected = transition_trust_with_policy(
+        &repo,
+        &context,
+        &signature_history.id,
+        TrustLevel::Verified,
+        Some("mixed signature history is insufficient".into()),
+        true,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        signature_rejected.code,
+        k_o_palace::error::PalaceErrorCode::TrustTransitionDenied
+    );
+
+    let mut all_verified = package;
+    all_verified.id = "all-verified-history.gene".into();
+    all_verified.name = "All Verified History".into();
+    for index in 1..=2 {
+        all_verified.version = format!("{index}.0.0");
+        all_verified.created_at += chrono::Duration::seconds(1);
+        all_verified.artifact_url =
+            Some(format!("https://example.com/all-verified-{index}.tar.gz"));
+        all_verified.trust.content_hash = Some(format!("sha256:all-verified-{index}"));
+        let artifact = VerifiedArtifact {
+            url: all_verified.artifact_url.clone().unwrap(),
+            content_type: Some("application/gzip".into()),
+            size_bytes: 256,
+            content_hash: all_verified.trust.content_hash.clone().unwrap(),
+            signature: Some("verified-signature".into()),
+            public_key: Some("verified-public-key".into()),
+        };
+        repo.publish_verified_package(&all_verified, Some(&artifact), Some(owner.id))
+            .await
+            .unwrap();
+    }
+
+    let transition = transition_trust_with_policy(
+        &repo,
+        &context,
+        &all_verified.id,
+        TrustLevel::Verified,
+        Some("every artifact and signature is verified".into()),
+        true,
+    )
+    .await
+    .unwrap();
+    assert_eq!(transition.to_level, "verified");
+}

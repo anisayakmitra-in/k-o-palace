@@ -11,6 +11,12 @@ fn validate_startup_config(
     if config.security.replica_count != 1 {
         return Err("PALACE_REPLICA_COUNT must be 1 while rate limiting is process-local".into());
     }
+    if config.security.trust_forwarded_headers && config.security.trusted_proxy_ips.is_empty() {
+        return Err(
+            "PALACE_TRUSTED_PROXY_IPS must contain at least one exact IP when PALACE_TRUST_PROXY_HEADERS is true"
+                .into(),
+        );
+    }
 
     if !config.server.bind_addr.ip().is_loopback() {
         if !config.security.behind_tls_proxy {
@@ -49,7 +55,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .with(filter)
         .init();
 
-    let config = PalaceConfig::from_env();
+    let config = PalaceConfig::try_from_env()?;
     validate_startup_config(&config)?;
     #[cfg(feature = "postgres")]
     let state = AppState::postgres(config.clone()).await?;
@@ -168,6 +174,17 @@ mod tests {
         assert!(http_error.to_string().contains("https"));
     }
 
+    #[test]
+    fn trusted_proxy_headers_require_an_explicit_proxy_allowlist() {
+        let mut config = PalaceConfig::default();
+        config.security.trust_forwarded_headers = true;
+
+        let error = validate_startup_config(&config).unwrap_err();
+        assert!(error.to_string().contains("PALACE_TRUSTED_PROXY_IPS"));
+
+        config.security.trusted_proxy_ips = vec!["127.0.0.1".parse().unwrap()];
+        validate_startup_config(&config).unwrap();
+    }
     #[test]
     fn public_bind_accepts_tls_proxy_with_https_public_url() {
         let mut config = PalaceConfig::default();

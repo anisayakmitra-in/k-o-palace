@@ -307,6 +307,33 @@ impl InMemoryRepository {
             .collect())
     }
 
+    pub async fn list_versions_page(
+        &self,
+        id: &str,
+        pagination: Pagination,
+    ) -> PalaceResult<(usize, Vec<VersionInfo>)> {
+        let map = self.packages.read().await;
+        let versions = map
+            .get(id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        let total = versions.len();
+        let mut versions = versions.iter().collect::<Vec<_>>();
+        versions.sort_by_key(|package| std::cmp::Reverse(package.created_at));
+        let (start, end) = pagination.bounds(total);
+        Ok((
+            total,
+            versions[start..end]
+                .iter()
+                .map(|package| VersionInfo {
+                    version: package.version.clone(),
+                    created_at: package.created_at,
+                    artifact_url: package.artifact_url.clone(),
+                    content_hash: package.trust.content_hash.clone(),
+                })
+                .collect(),
+        ))
+    }
+
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
         self.publish_verified_package(package, None, None).await
     }
@@ -397,6 +424,44 @@ impl InMemoryRepository {
         .await?;
 
         Ok(package.clone())
+    }
+
+    pub async fn has_verified_artifact(
+        &self,
+        id: &str,
+        version: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        Ok(self
+            .artifacts
+            .read()
+            .await
+            .get(&(id.to_string(), version.to_string()))
+            .is_some_and(|artifact| {
+                !require_signature
+                    || (artifact.signature.is_some() && artifact.public_key.is_some())
+            }))
+    }
+
+    pub async fn has_verified_artifacts_for_all_versions(
+        &self,
+        id: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        let packages = self.packages.read().await;
+        let versions = packages
+            .get(id)
+            .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
+        let artifacts = self.artifacts.read().await;
+        Ok(!versions.is_empty()
+            && versions.iter().all(|package| {
+                artifacts
+                    .get(&(id.to_string(), package.version.clone()))
+                    .is_some_and(|artifact| {
+                        !require_signature
+                            || (artifact.signature.is_some() && artifact.public_key.is_some())
+                    })
+            }))
     }
 
     pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {

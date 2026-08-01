@@ -624,6 +624,53 @@ impl PostgresRepository {
             .collect())
     }
 
+    pub async fn list_versions_page(
+        &self,
+        id: &str,
+        pagination: Pagination,
+    ) -> PalaceResult<(usize, Vec<VersionInfo>)> {
+        let total = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM packages WHERE id = $1")
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(repository_error)?;
+        if total == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package not found",
+            ));
+        }
+        let rows = sqlx::query_as::<
+            _,
+            (
+                String,
+                chrono::DateTime<Utc>,
+                Option<String>,
+                Option<String>,
+            ),
+        >(
+            "SELECT version, created_at, artifact_url, content_hash FROM packages WHERE id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3",
+        )
+        .bind(id)
+        .bind(pagination.limit as i64)
+        .bind(pagination.offset as i64)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(repository_error)?;
+
+        Ok((
+            total as usize,
+            rows.into_iter()
+                .map(|row| VersionInfo {
+                    version: row.0,
+                    created_at: row.1,
+                    artifact_url: row.2,
+                    content_hash: row.3,
+                })
+                .collect(),
+        ))
+    }
+
     pub async fn publish_package(&self, package: &Package) -> PalaceResult<Package> {
         self.publish_verified_package(package, None, None).await
     }
@@ -780,6 +827,74 @@ impl PostgresRepository {
 
         transaction.commit().await.map_err(repository_error)?;
         Ok(package.clone())
+    }
+
+    pub async fn has_verified_artifact(
+        &self,
+        id: &str,
+        version: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        let query = if require_signature {
+            "SELECT EXISTS(
+                SELECT 1 FROM artifacts
+                WHERE package_id = $1 AND package_version = $2
+                  AND EXISTS(
+                      SELECT 1 FROM signatures
+                      WHERE package_id = $1 AND package_version = $2 AND verified_at IS NOT NULL
+                  )
+            )"
+        } else {
+            "SELECT EXISTS(
+                SELECT 1 FROM artifacts
+                WHERE package_id = $1 AND package_version = $2
+            )"
+        };
+        sqlx::query_scalar::<_, bool>(query)
+            .bind(id)
+            .bind(version)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(repository_error)
+    }
+
+    pub async fn has_verified_artifacts_for_all_versions(
+        &self,
+        id: &str,
+        require_signature: bool,
+    ) -> PalaceResult<bool> {
+        let query = if require_signature {
+            "SELECT EXISTS(SELECT 1 FROM packages WHERE id = $1)
+                AND NOT EXISTS(
+                    SELECT 1 FROM packages p
+                    WHERE p.id = $1
+                      AND NOT EXISTS(
+                          SELECT 1 FROM artifacts a
+                          WHERE a.package_id = p.id AND a.package_version = p.version
+                            AND EXISTS(
+                                SELECT 1 FROM signatures s
+                                WHERE s.package_id = p.id
+                                  AND s.package_version = p.version
+                                  AND s.verified_at IS NOT NULL
+                            )
+                      )
+                )"
+        } else {
+            "SELECT EXISTS(SELECT 1 FROM packages WHERE id = $1)
+                AND NOT EXISTS(
+                    SELECT 1 FROM packages p
+                    WHERE p.id = $1
+                      AND NOT EXISTS(
+                          SELECT 1 FROM artifacts a
+                          WHERE a.package_id = p.id AND a.package_version = p.version
+                      )
+                )"
+        };
+        sqlx::query_scalar::<_, bool>(query)
+            .bind(id)
+            .fetch_one(&self.pool)
+            .await
+            .map_err(repository_error)
     }
 
     pub async fn update_package(&self, package: &Package) -> PalaceResult<Package> {

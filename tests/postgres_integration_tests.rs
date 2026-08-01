@@ -7,7 +7,8 @@ use k_o_palace::{
         AuditEvent, CapabilityInfo, CompatibilityInfo, Package, PackageKind, Publisher,
         PublisherVerification, Review, ReviewStatus, Role, TrustInfo, TrustLevel,
     },
-    repository::{postgres::PostgresRepository, PackageRepository},
+    pagination::Pagination,
+    repository::{postgres::PostgresRepository, PackageRepository, VerifiedArtifact},
 };
 use uuid::Uuid;
 
@@ -237,4 +238,90 @@ async fn postgres_publisher_verification_and_audit_are_atomic() {
             .unwrap()
             .verified
     );
+}
+#[tokio::test]
+async fn postgres_versions_and_verified_artifact_evidence_are_bounded_and_durable() {
+    let Some(url) = database_url() else {
+        return;
+    };
+    let repository = PostgresRepository::new(&url).await.unwrap();
+    repository.migrate().await.unwrap();
+    let repository = PackageRepository::Postgres(repository);
+    let publisher = Publisher {
+        id: Uuid::new_v4(),
+        name: format!("pgversions{}", Uuid::new_v4().simple()),
+        display_name: "PostgreSQL Version Owner".into(),
+        email: None,
+        website: None,
+        role: Role::Publisher,
+        created_at: Utc::now(),
+    };
+    repository.create_publisher(&publisher).await.unwrap();
+
+    let mut mixed_history = package(&publisher.name);
+    let package_id = mixed_history.id.clone();
+    let base = Utc::now();
+    for (index, version) in ["1.0.0", "2.0.0", "3.0.0"].into_iter().enumerate() {
+        mixed_history.version = version.into();
+        mixed_history.created_at = base + chrono::Duration::seconds(index as i64);
+        let artifact = (version == "3.0.0").then(|| VerifiedArtifact {
+            url: format!("https://example.com/{version}.tar.gz"),
+            content_type: Some("application/gzip".into()),
+            size_bytes: 128,
+            content_hash: format!("sha256:{version}"),
+            signature: None,
+            public_key: None,
+        });
+        repository
+            .publish_verified_package(&mixed_history, artifact.as_ref(), Some(publisher.id))
+            .await
+            .unwrap();
+    }
+
+    let (total, versions) = repository
+        .list_versions_page(&package_id, Pagination::new(1, 1).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(total, 3);
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, "2.0.0");
+    assert!(!repository
+        .has_verified_artifact(&package_id, "2.0.0", false)
+        .await
+        .unwrap());
+    assert!(repository
+        .has_verified_artifact(&package_id, "3.0.0", false)
+        .await
+        .unwrap());
+    assert!(!repository
+        .has_verified_artifacts_for_all_versions(&package_id, false)
+        .await
+        .unwrap());
+
+    let mut all_verified = package(&publisher.name);
+    let all_verified_id = all_verified.id.clone();
+    for (index, version) in ["1.0.0", "2.0.0"].into_iter().enumerate() {
+        all_verified.version = version.into();
+        all_verified.created_at = base + chrono::Duration::seconds(index as i64);
+        let artifact = VerifiedArtifact {
+            url: format!("https://example.com/all-{version}.tar.gz"),
+            content_type: Some("application/gzip".into()),
+            size_bytes: 128,
+            content_hash: format!("sha256:all-{version}"),
+            signature: Some("verified-signature".into()),
+            public_key: Some("verified-public-key".into()),
+        };
+        repository
+            .publish_verified_package(&all_verified, Some(&artifact), Some(publisher.id))
+            .await
+            .unwrap();
+    }
+    assert!(repository
+        .has_verified_artifacts_for_all_versions(&all_verified_id, false)
+        .await
+        .unwrap());
+    assert!(repository
+        .has_verified_artifacts_for_all_versions(&all_verified_id, true)
+        .await
+        .unwrap());
 }
