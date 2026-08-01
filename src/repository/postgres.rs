@@ -116,7 +116,7 @@ impl PostgresRepository {
             ),
         >(
             "INSERT INTO publishers (id, name, display_name, email, website, role, created_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
              ON CONFLICT (name) DO NOTHING
              RETURNING id, name, display_name, email, website, role, created_at",
         )
@@ -238,7 +238,7 @@ impl PostgresRepository {
     pub async fn create_api_token(&self, token: &ApiToken) -> PalaceResult<()> {
         sqlx::query(
             "INSERT INTO api_tokens (id, publisher_id, token_hash, name, created_at, revoked_at, expires_at, scopes)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+             VALUES ($1, $2, $3, $4, $5, $6, $7)"
         )
         .bind(token.id)
         .bind(token.publisher_id)
@@ -517,7 +517,7 @@ impl PostgresRepository {
         }
 
         sqlx::query(
-            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(Uuid::now_v7())
         .bind("package.published")
@@ -740,7 +740,7 @@ impl PostgresRepository {
             .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
         sqlx::query(
-            "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            "INSERT INTO trust_transitions (id, package_id, from_level, to_level, approved_by, reason, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(Uuid::now_v7())
         .bind(&transition.package_id)
@@ -801,7 +801,7 @@ impl PostgresRepository {
     pub async fn record_audit_event(&self, event: &AuditEvent) -> PalaceResult<()> {
         let id = uuid::Uuid::now_v7();
         sqlx::query(
-            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"
+            "INSERT INTO audit_events (id, event_type, actor_id, target_type, target_id, metadata, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7)"
         )
         .bind(id)
         .bind(&event.event_type)
