@@ -277,3 +277,40 @@ async fn artifact_publish_without_digest_is_rejected_before_persistence() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn artifact_publish_with_malformed_digest_is_rejected_before_fetching() {
+    let state = test_state();
+    let (publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
+        .await
+        .unwrap();
+    let mut package = valid_pkg("malformed-artifact");
+    package.trust.publisher = publisher.name;
+    package.artifact_url =
+        Some("https://github.com/test/test/releases/download/v1.0.0/pkg.tar.gz".into());
+    package.trust.content_hash = Some("sha256:not-a-digest".into());
+
+    let app = router(state);
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/api/v1/packages")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::to_string(&package).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let missing = app
+        .oneshot(
+            Request::get("/api/v1/packages/malformed-artifact")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+}

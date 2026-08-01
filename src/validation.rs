@@ -4,7 +4,7 @@ use crate::{
     error::{PalaceError, PalaceErrorCode, PalaceResult},
     models::{
         CapabilityInfo, CompatibilityInfo, KuberManifest, ManifestTrust, Package, PackageKind,
-        TrustLevel,
+        TrustInfo, TrustLevel,
     },
 };
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
@@ -57,6 +57,7 @@ pub fn validate_package(pkg: &Package) -> PalaceResult<()> {
     validate_non_empty(&pkg.license, "license", &mut errors);
     validate_capabilities(&pkg.capabilities, &mut errors);
     validate_compatibility(&pkg.compatibility, &mut errors);
+    validate_package_trust(&pkg.trust, &mut errors);
     if let Some(url) = &pkg.repository {
         if !is_valid_https_url(url) {
             errors.push(("repository", format!("invalid HTTPS URL: {url}")));
@@ -212,6 +213,34 @@ fn validate_trust_metadata(trust: &ManifestTrust, errors: &mut Vec<(&'static str
     }
 }
 
+fn validate_package_trust(trust: &TrustInfo, errors: &mut Vec<(&'static str, String)>) {
+    match (&trust.signature, &trust.public_key) {
+        (Some(_), None) | (None, Some(_)) => errors.push((
+            "trust.signature",
+            "signature and public_key must be provided together".into(),
+        )),
+        (Some(signature), Some(public_key)) => {
+            if BASE64.decode(signature).is_err() {
+                errors.push(("trust.signature", "signature must be valid base64".into()));
+            }
+            if BASE64.decode(public_key).is_err() {
+                errors.push(("trust.public_key", "public_key must be valid base64".into()));
+            }
+        }
+        (None, None) => {}
+    }
+
+    if let Some(content_hash) = &trust.content_hash {
+        let digest = content_hash.strip_prefix("sha256:");
+        if !matches!(digest, Some(value) if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        {
+            errors.push((
+                "trust.content_hash",
+                "content_hash must be a sha256: digest with 64 hexadecimal characters".into(),
+            ));
+        }
+    }
+}
 fn validate_metadata(
     meta: &crate::models::ManifestMetadata,
     errors: &mut Vec<(&'static str, String)>,
