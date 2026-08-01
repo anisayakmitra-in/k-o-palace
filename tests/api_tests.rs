@@ -314,3 +314,20 @@ async fn artifact_publish_with_malformed_digest_is_rejected_before_fetching() {
         .unwrap();
     assert_eq!(missing.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn missing_download_version_is_rejected() {
+    let state = test_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("download.gene"))
+        .await
+        .unwrap();
+
+    let error = state
+        .repo
+        .record_download("download.gene", "9.9.9")
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, k_o_palace::error::PalaceErrorCode::NotFound);
+}

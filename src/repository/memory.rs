@@ -323,8 +323,12 @@ impl InMemoryRepository {
             .ok_or_else(|| PalaceError::new(PalaceErrorCode::NotFound, "package not found"))?;
         if let Some(pkg) = versions.iter_mut().find(|p| p.version == version) {
             pkg.downloads += 1;
+            return Ok(());
         }
-        Ok(())
+        Err(PalaceError::new(
+            PalaceErrorCode::NotFound,
+            "package version not found",
+        ))
     }
 
     pub async fn search(

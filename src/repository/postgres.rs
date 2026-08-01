@@ -669,12 +669,34 @@ impl PostgresRepository {
     }
 
     pub async fn record_download(&self, id: &str, version: &str) -> PalaceResult<()> {
-        sqlx::query("UPDATE packages SET downloads = downloads + 1 WHERE id = $1 AND version = $2")
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        let result = sqlx::query(
+            "UPDATE packages SET downloads = downloads + 1 WHERE id = $1 AND version = $2",
+        )
+        .bind(id)
+        .bind(version)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        if result.rows_affected() == 0 {
+            return Err(PalaceError::new(
+                PalaceErrorCode::NotFound,
+                "package version not found",
+            ));
+        }
+        sqlx::query("INSERT INTO download_events (package_id, package_version) VALUES ($1, $2)")
             .bind(id)
             .bind(version)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
-            .map(|_| ())
+            .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))?;
+        transaction
+            .commit()
+            .await
             .map_err(|e| PalaceError::new(PalaceErrorCode::ServerError, e.to_string()))
     }
 
