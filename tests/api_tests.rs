@@ -788,6 +788,72 @@ async fn dependency_resolution_endpoint_returns_capability_graph() {
 }
 
 #[tokio::test]
+async fn dependency_resolution_rejects_catalog_over_candidate_limit() {
+    let state = test_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("root.package"))
+        .await
+        .unwrap();
+    for index in 0..1_000 {
+        state
+            .repo
+            .publish_package(&valid_pkg(format!("candidate-{index}")))
+            .await
+            .unwrap();
+    }
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/root.package/resolve")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: k_o_palace::error::PalaceError = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.code, k_o_palace::error::PalaceErrorCode::TooLarge);
+}
+
+#[tokio::test]
+async fn dependency_resolution_rejects_catalog_over_serialized_byte_budget() {
+    let state = test_state();
+    state
+        .repo
+        .publish_package(&valid_pkg("root.package"))
+        .await
+        .unwrap();
+    let mut oversized = valid_pkg("oversized-candidate");
+    oversized.description = "x".repeat(1024 * 1024);
+    state.repo.publish_package(&oversized).await.unwrap();
+
+    let response = router(state)
+        .oneshot(
+            Request::get("/api/v1/packages/root.package/resolve")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: k_o_palace::error::PalaceError = serde_json::from_slice(
+        &axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(body.code, k_o_palace::error::PalaceErrorCode::TooLarge);
+}
+
+#[tokio::test]
 async fn publisher_cannot_publish_under_another_namespace() {
     let state = test_state();
     let (_publisher, token) = register_publisher(&state.repo, "owner", "Owner", None, None)
@@ -859,13 +925,17 @@ async fn disabled_proxy_header_trust_ignores_forwarded_ips_for_allowlisted_peer(
 }
 
 #[tokio::test]
-async fn trusted_proxy_uses_only_first_forwarded_address_for_public_read_limit() {
+async fn trusted_proxy_uses_nearest_untrusted_forwarded_hop_for_public_read_limit() {
     let proxy_ip: IpAddr = "203.0.113.11".parse().unwrap();
-    let app = router(read_limited_state(true, vec![proxy_ip]));
+    let intermediary_proxy_ip: IpAddr = "192.0.2.10".parse().unwrap();
+    let app = router(read_limited_state(
+        true,
+        vec![proxy_ip, intermediary_proxy_ip],
+    ));
     let peer = SocketAddr::new(proxy_ip, 41001);
 
     let mut first = Request::get("/api/v1/packages")
-        .header("x-forwarded-for", "198.51.100.1, 192.0.2.10")
+        .header("x-forwarded-for", "203.0.113.200, 198.51.100.1, 192.0.2.10")
         .body(Body::empty())
         .unwrap();
     first.extensions_mut().insert(ConnectInfo(peer));
@@ -875,22 +945,12 @@ async fn trusted_proxy_uses_only_first_forwarded_address_for_public_read_limit()
     );
 
     let mut second = Request::get("/api/v1/packages")
-        .header("x-forwarded-for", "198.51.100.2, 198.51.100.1")
+        .header("x-forwarded-for", "203.0.113.201, 198.51.100.1, 192.0.2.10")
         .body(Body::empty())
         .unwrap();
     second.extensions_mut().insert(ConnectInfo(peer));
     assert_eq!(
-        app.clone().oneshot(second).await.unwrap().status(),
-        StatusCode::OK
-    );
-
-    let mut repeated_first = Request::get("/api/v1/packages")
-        .header("x-forwarded-for", "198.51.100.2, 192.0.2.200")
-        .body(Body::empty())
-        .unwrap();
-    repeated_first.extensions_mut().insert(ConnectInfo(peer));
-    assert_eq!(
-        app.oneshot(repeated_first).await.unwrap().status(),
+        app.oneshot(second).await.unwrap().status(),
         StatusCode::TOO_MANY_REQUESTS
     );
 }
@@ -902,7 +962,33 @@ async fn trusted_proxy_invalid_or_missing_forwarded_address_uses_direct_peer() {
     let peer = SocketAddr::new(proxy_ip, 41002);
 
     let mut invalid = Request::get("/api/v1/packages")
-        .header("x-forwarded-for", "not-an-ip")
+        .header("x-forwarded-for", "198.51.100.1, not-an-ip, 192.0.2.10")
+        .body(Body::empty())
+        .unwrap();
+    invalid.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.clone().oneshot(invalid).await.unwrap().status(),
+        StatusCode::OK
+    );
+
+    let mut missing = Request::get("/api/v1/packages")
+        .body(Body::empty())
+        .unwrap();
+    missing.extensions_mut().insert(ConnectInfo(peer));
+    assert_eq!(
+        app.oneshot(missing).await.unwrap().status(),
+        StatusCode::TOO_MANY_REQUESTS
+    );
+}
+
+#[tokio::test]
+async fn trusted_proxy_empty_forwarded_element_uses_direct_peer() {
+    let proxy_ip: IpAddr = "203.0.113.14".parse().unwrap();
+    let app = router(read_limited_state(true, vec![proxy_ip]));
+    let peer = SocketAddr::new(proxy_ip, 41004);
+
+    let mut invalid = Request::get("/api/v1/packages")
+        .header("x-forwarded-for", "198.51.100.1, , 192.0.2.10")
         .body(Body::empty())
         .unwrap();
     invalid.extensions_mut().insert(ConnectInfo(peer));

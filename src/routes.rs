@@ -36,7 +36,10 @@ use axum::{
     Extension, Json, Router,
 };
 use chrono::Utc;
-use std::time::Duration;
+use std::{
+    io::{self, Write},
+    time::Duration,
+};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -59,13 +62,27 @@ fn anonymous_client_ip(
         return Some(peer_ip);
     }
 
-    headers
-        .get("x-forwarded-for")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|value| value.parse::<IpAddr>().ok())
+    let mut forwarded_ips = Vec::new();
+    for value in headers.get_all("x-forwarded-for") {
+        let Ok(value) = value.to_str() else {
+            return Some(peer_ip);
+        };
+        for element in value.split(',') {
+            let element = element.trim();
+            if element.is_empty() {
+                return Some(peer_ip);
+            }
+            let Ok(forwarded_ip) = element.parse::<IpAddr>() else {
+                return Some(peer_ip);
+            };
+            forwarded_ips.push(forwarded_ip);
+        }
+    }
+
+    forwarded_ips
+        .into_iter()
+        .rev()
+        .find(|forwarded_ip| !security.trusted_proxy_ips.contains(forwarded_ip))
         .or(Some(peer_ip))
 }
 
@@ -256,6 +273,63 @@ async fn get_package(
     Ok(Json(state.repo.get_package(&id).await?))
 }
 
+const RESOLUTION_PAGE_SIZE: usize = 100;
+const MAX_RESOLUTION_CANDIDATES: usize = 1_000;
+const MAX_RESOLUTION_CATALOG_BYTES: usize = 1024 * 1024;
+
+struct SerializedSizeLimiter {
+    remaining: usize,
+    written: usize,
+}
+
+impl Write for SerializedSizeLimiter {
+    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() > self.remaining {
+            return Err(io::Error::other("serialized size limit exceeded"));
+        }
+        self.remaining -= buffer.len();
+        self.written += buffer.len();
+        Ok(buffer.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+fn resolution_catalog_too_large() -> PalaceError {
+    PalaceError::new(
+        PalaceErrorCode::TooLarge,
+        "package catalog is too large to resolve in one request",
+    )
+}
+
+fn extend_resolution_catalog(
+    candidates: &mut Vec<Package>,
+    retained_bytes: &mut usize,
+    page: Vec<Package>,
+) -> PalaceResult<()> {
+    let candidate_count = candidates
+        .len()
+        .checked_add(page.len())
+        .ok_or_else(resolution_catalog_too_large)?;
+    if candidate_count > MAX_RESOLUTION_CANDIDATES {
+        return Err(resolution_catalog_too_large());
+    }
+
+    let remaining = MAX_RESOLUTION_CATALOG_BYTES
+        .checked_sub(*retained_bytes)
+        .ok_or_else(resolution_catalog_too_large)?;
+    let mut limiter = SerializedSizeLimiter {
+        remaining,
+        written: 0,
+    };
+    serde_json::to_writer(&mut limiter, &page).map_err(|_| resolution_catalog_too_large())?;
+    *retained_bytes += limiter.written;
+    candidates.extend(page);
+    Ok(())
+}
+
 async fn resolve_package(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
@@ -275,7 +349,6 @@ async fn resolve_package(
             format!("rate limit exceeded, retry after {retry}s"),
         ));
     }
-    const MAX_RESOLUTION_PACKAGES: usize = 50_000;
     let root = state.repo.get_package(&id).await?;
     if root.yanked {
         return Err(PalaceError::new(
@@ -308,23 +381,21 @@ async fn resolve_package(
     };
 
     let mut candidates = Vec::new();
+    let mut retained_bytes = 0;
     let mut offset = 0;
     loop {
-        let pagination = Pagination::new(crate::pagination::MAX_LIMIT, offset)?;
+        let pagination = Pagination::new(RESOLUTION_PAGE_SIZE, offset)?;
         let (total, page) = state
             .repo
             .list_packages(PackageFilters::default(), pagination)
             .await?;
-        if total > MAX_RESOLUTION_PACKAGES {
-            return Err(PalaceError::new(
-                PalaceErrorCode::TooLarge,
-                "package graph is too large to resolve in one request",
-            ));
+        if total > MAX_RESOLUTION_CANDIDATES {
+            return Err(resolution_catalog_too_large());
         }
         if page.is_empty() {
             break;
         }
-        candidates.extend(page);
+        extend_resolution_catalog(&mut candidates, &mut retained_bytes, page)?;
         if candidates.len() >= total {
             break;
         }

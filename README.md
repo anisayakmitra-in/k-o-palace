@@ -12,7 +12,7 @@ K-O Palace is a runtime-agnostic AI package registry that implements the K-O Pal
 - **Trust levels** with explicit server-enforced transitions, backed by publisher verification for identified publishers
 - **Ed25519 signature verification** and SHA-256 content-hash verification
 - **Artifact delivery** from local filesystem and GitHub Release sources, with HTTPS enforcement, host allowlists, bounded streaming to temporary files, redirect limits, and checksum verification
-- **Capability dependency resolution** with runtime/platform filtering, yanked-package exclusion, deterministic candidate ranking, and bounded graph traversal
+- **Capability dependency resolution** with runtime/platform filtering, yanked-package exclusion, deterministic candidate ranking, a 1,000-candidate/1 MiB serialized catalog budget, and bounded graph traversal
 - **Search** with ranked relevance scoring
 - **Structured errors** with stable error codes
 - **CORS** configured from explicit origins (not permissive)
@@ -99,7 +99,7 @@ cargo run --no-default-features
 | `PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE` | `240` | Download requests per minute per limiter key |
 | `PALACE_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Authentication and registration requests per minute per limiter key |
 | `PALACE_RATE_LIMIT_RESOLVE_PER_MINUTE` | `60` | Dependency resolution requests per minute per limiter key |
-| `PALACE_TRUST_PROXY_HEADERS` | `false` | Trust the first `X-Forwarded-For` address only when the direct peer is exactly allowlisted; startup requires a non-empty proxy allowlist when enabled |
+| `PALACE_TRUST_PROXY_HEADERS` | `false` | Trust a complete, valid `X-Forwarded-For` chain only when the direct peer is exactly allowlisted; select the nearest untrusted hop after skipping exact-IP trusted proxies, and fall back to the direct peer for malformed chains |
 | `PALACE_TRUSTED_PROXY_IPS` | (empty) | Comma-separated exact IP addresses of trusted direct proxy peers; hostnames and CIDR ranges are rejected |
 | `PALACE_BEHIND_TLS_PROXY` | `false` | Must be `true` when binding beyond loopback; the trusted reverse proxy must terminate TLS |
 | `PALACE_REPLICA_COUNT` | `1` | Must remain `1` while rate limiting is process-local |
@@ -181,7 +181,7 @@ Artifacts must be served over HTTPS from an allowlisted host. Default allowed ho
 - `github.com`
 - `objects.githubusercontent.com`
 
-Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND` (`local` or `github`; other values fail startup), `PALACE_ALLOW_PUBLIC_REGISTRATION` (disabled by default), `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, `PALACE_TRUST_PROXY_HEADERS`, and `PALACE_TRUSTED_PROXY_IPS`. Anonymous rate-limit and download-dedupe keys use the direct peer IP unless proxy-header trust is enabled and that peer is in the exact-IP allowlist; only the first valid `X-Forwarded-For` address is then used.
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND` (`local` or `github`; other values fail startup), `PALACE_ALLOW_PUBLIC_REGISTRATION` (disabled by default), `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, `PALACE_TRUST_PROXY_HEADERS`, and `PALACE_TRUSTED_PROXY_IPS`. Anonymous rate-limit and download-dedupe keys use the direct peer IP unless proxy-header trust is enabled and that peer is in the exact-IP allowlist. The complete `X-Forwarded-For` chain must parse as non-empty IP elements; the nearest untrusted hop is selected from right to left after skipping exact-IP trusted proxies, while any malformed chain falls back to the direct peer.
 
 API tokens can request `packages:read`, `packages:publish`, `packages:write`, `tokens:manage`, `moderation:write`, or `admin:write` scopes and may include an `expires_at` timestamp. New tokens are addressable by their token ID; older tokens continue through the compatibility verifier.
 
