@@ -13,6 +13,15 @@ use semver::Version;
 use std::collections::HashSet;
 use url::Url;
 
+const MAX_CAPABILITY_ENTRIES: usize = 128;
+const MAX_CAPABILITY_LENGTH: usize = 256;
+const MAX_COMPATIBILITY_ENTRIES: usize = 64;
+const MAX_COMPATIBILITY_LENGTH: usize = 128;
+const MAX_TAGS: usize = 50;
+const MAX_TAG_LENGTH: usize = 32;
+const MAX_EXAMPLES: usize = 50;
+const MAX_EXAMPLE_LENGTH: usize = 4096;
+
 /// Validate a `palace.toml` manifest against the documented specification.
 pub fn validate_manifest(manifest: &PalaceManifest) -> PalaceResult<()> {
     let mut errors = Vec::new();
@@ -57,6 +66,7 @@ pub fn validate_package(pkg: &Package) -> PalaceResult<()> {
     validate_non_empty(&pkg.license, "license", &mut errors);
     validate_capabilities(&pkg.capabilities, &mut errors);
     validate_compatibility(&pkg.compatibility, &mut errors);
+    validate_tags(&pkg.tags, "tags", &mut errors);
     validate_package_trust(&pkg.trust, &mut errors);
     if let Some(url) = &pkg.repository {
         if !is_valid_https_url(url) {
@@ -127,38 +137,66 @@ fn validate_non_empty(value: &str, field: &'static str, errors: &mut Vec<(&'stat
 }
 
 fn validate_capabilities(cap: &CapabilityInfo, errors: &mut Vec<(&'static str, String)>) {
-    for (i, c) in cap.provides.iter().enumerate() {
-        if c.trim().is_empty() {
-            errors.push((
-                "capabilities.provides",
-                format!("empty capability at index {i}"),
-            ));
-        }
-    }
-    for (i, c) in cap.requires.iter().enumerate() {
-        if c.trim().is_empty() {
-            errors.push((
-                "capabilities.requires",
-                format!("empty capability at index {i}"),
-            ));
-        }
-    }
+    validate_string_list(
+        &cap.provides,
+        "capabilities.provides",
+        MAX_CAPABILITY_ENTRIES,
+        MAX_CAPABILITY_LENGTH,
+        "capability",
+        errors,
+    );
+    validate_string_list(
+        &cap.requires,
+        "capabilities.requires",
+        MAX_CAPABILITY_ENTRIES,
+        MAX_CAPABILITY_LENGTH,
+        "capability",
+        errors,
+    );
 }
 
 fn validate_compatibility(comp: &CompatibilityInfo, errors: &mut Vec<(&'static str, String)>) {
-    for (i, r) in comp.runtimes.iter().enumerate() {
-        if r.trim().is_empty() {
-            errors.push((
-                "compatibility.runtimes",
-                format!("empty runtime at index {i}"),
-            ));
-        }
+    validate_string_list(
+        &comp.runtimes,
+        "compatibility.runtimes",
+        MAX_COMPATIBILITY_ENTRIES,
+        MAX_COMPATIBILITY_LENGTH,
+        "runtime",
+        errors,
+    );
+    validate_string_list(
+        &comp.platforms,
+        "compatibility.platforms",
+        MAX_COMPATIBILITY_ENTRIES,
+        MAX_COMPATIBILITY_LENGTH,
+        "platform",
+        errors,
+    );
+}
+
+fn validate_tags(tags: &[String], field: &'static str, errors: &mut Vec<(&'static str, String)>) {
+    validate_string_list(tags, field, MAX_TAGS, MAX_TAG_LENGTH, "tag", errors);
+}
+
+fn validate_string_list(
+    values: &[String],
+    field: &'static str,
+    max_entries: usize,
+    max_length: usize,
+    label: &str,
+    errors: &mut Vec<(&'static str, String)>,
+) {
+    if values.len() > max_entries {
+        errors.push((field, format!("too many {label}s (max {max_entries})")));
     }
-    for (i, p) in comp.platforms.iter().enumerate() {
-        if p.trim().is_empty() {
+    for (index, value) in values.iter().enumerate() {
+        if value.trim().is_empty() {
+            errors.push((field, format!("empty {label} at index {index}")));
+        }
+        if value.len() > max_length {
             errors.push((
-                "compatibility.platforms",
-                format!("empty platform at index {i}"),
+                field,
+                format!("{label} at index {index} exceeds {max_length} characters"),
             ));
         }
     }
@@ -245,13 +283,24 @@ fn validate_metadata(
     meta: &crate::models::ManifestMetadata,
     errors: &mut Vec<(&'static str, String)>,
 ) {
-    if meta.tags.len() > 50 {
-        errors.push(("metadata.tags", "too many tags (max 50)".into()));
-    }
-    for (i, t) in meta.tags.iter().enumerate() {
-        if t.len() > 32 {
-            errors.push(("metadata.tags", format!("tag at index {i} too long")));
-        }
+    validate_tags(&meta.tags, "metadata.tags", errors);
+    validate_string_list(
+        &meta.examples,
+        "metadata.examples",
+        MAX_EXAMPLES,
+        MAX_EXAMPLE_LENGTH,
+        "example",
+        errors,
+    );
+    if meta
+        .documentation
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_EXAMPLE_LENGTH)
+    {
+        errors.push((
+            "metadata.documentation",
+            format!("documentation exceeds {MAX_EXAMPLE_LENGTH} characters"),
+        ));
     }
 }
 

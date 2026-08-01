@@ -180,11 +180,10 @@ impl PalaceConfig {
             if let Ok(value) = size.parse() {
                 cfg.storage.max_artifact_size_bytes = value;
             }
-
-            if let Ok(size) = std::env::var("PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES") {
-                if let Ok(value) = size.parse() {
-                    cfg.storage.max_signed_artifact_size_bytes = value;
-                }
+        }
+        if let Ok(size) = std::env::var("PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES") {
+            if let Ok(value) = size.parse() {
+                cfg.storage.max_signed_artifact_size_bytes = value;
             }
         }
         if let Ok(size) = std::env::var("PALACE_MAX_BODY_BYTES") {

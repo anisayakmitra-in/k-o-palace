@@ -107,3 +107,19 @@ fn valid_package() -> Package {
         updated_at: Utc::now(),
     }
 }
+
+#[test]
+fn manifest_metadata_lists_are_bounded() {
+    let mut manifest = valid_manifest();
+    manifest.metadata.examples = vec!["example".into(); 51];
+    let err = validate_manifest(&manifest).unwrap_err();
+    assert_eq!(err.code, PalaceErrorCode::InvalidManifest);
+}
+
+#[test]
+fn package_metadata_lists_are_bounded() {
+    let mut package = valid_package();
+    package.capabilities.provides = vec!["capability".into(); 129];
+    let err = validate_package(&package).unwrap_err();
+    assert_eq!(err.code, PalaceErrorCode::ValidationFailed);
+}
