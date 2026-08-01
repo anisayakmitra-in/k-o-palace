@@ -70,8 +70,13 @@ cargo run --no-default-features
 | `PALACE_BIND` | `127.0.0.1:3001` | Server bind address |
 | `PALACE_PUBLIC_URL` | `http://127.0.0.1:3001` | Public URL for downloads |
 | `DATABASE_URL` | `postgres://...` | PostgreSQL connection string |
+| `PALACE_DB_MAX_CONNECTIONS` | `10` | PostgreSQL pool maximum |
 | `PALACE_CORS_ORIGINS` | (empty) | Comma-separated allowed origins |
 | `PALACE_SEED_SAMPLES` | `false` | Seed sample packages on startup |
+| `PALACE_RATE_LIMIT_PUBLISH_PER_MINUTE` | `10` | Publish requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_SEARCH_PER_MINUTE` | `120` | Search requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE` | `240` | Download requests per minute per limiter key |
+| `PALACE_RATE_LIMIT_AUTH_PER_MINUTE` | `10` | Authentication requests per minute per limiter key |
 
 ## PostgreSQL Setup
 
@@ -150,7 +155,7 @@ Artifacts must be served over HTTPS from an allowlisted host. Default allowed ho
 - `github.com`
 - `objects.githubusercontent.com`
 
-Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable.Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND`, `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, and `PALACE_TRUST_PROXY_HEADERS`. Forwarded headers must only be enabled behind a proxy that overwrites them.
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND`, `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, and `PALACE_TRUST_PROXY_HEADERS`. Forwarded headers must only be enabled behind a proxy that overwrites them.
 
 API tokens can request `packages:read`, `packages:publish`, `packages:write`, `tokens:manage`, `moderation:write`, or `admin:write` scopes and may include an `expires_at` timestamp. New tokens are addressable by their token ID; older tokens continue through the compatibility verifier.
 

@@ -141,6 +141,11 @@ impl PalaceConfig {
         if let Ok(url) = std::env::var("DATABASE_URL") {
             cfg.database.url = url;
         }
+        if let Ok(value) = std::env::var("PALACE_DB_MAX_CONNECTIONS") {
+            if let Ok(value) = value.parse::<u32>() {
+                cfg.database.max_connections = value.max(1);
+            }
+        }
         if let Ok(url) = std::env::var("PALACE_PUBLIC_URL") {
             cfg.server.public_url = url;
         }
@@ -180,6 +185,26 @@ impl PalaceConfig {
             if let Ok(value) = seconds.parse() {
                 cfg.security.request_timeout_secs = value;
                 cfg.server.request_timeout_seconds = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_PUBLISH_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_publish_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_SEARCH_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_search_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_DOWNLOAD_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_download_per_minute = value;
+            }
+        }
+        if let Ok(value) = std::env::var("PALACE_RATE_LIMIT_AUTH_PER_MINUTE") {
+            if let Ok(value) = value.parse() {
+                cfg.security.rate_limit_auth_per_minute = value;
             }
         }
         if let Ok(value) = std::env::var("PALACE_TRUST_PROXY_HEADERS") {
