@@ -5,6 +5,8 @@ use crate::error::{PalaceError, PalaceErrorCode, PalaceResult};
 use crate::models::TrustInfo;
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
+#[cfg(feature = "reqwest")]
+use tokio::io::AsyncWriteExt;
 use url::Url;
 
 /// Metadata about a fetched artifact.
@@ -269,6 +271,200 @@ async fn fetch_artifact(url: &str, config: &PalaceConfig) -> PalaceResult<Fetche
     unreachable!("redirect loop exits with a result")
 }
 
+#[cfg(feature = "reqwest")]
+struct TemporaryArtifact {
+    path: std::path::PathBuf,
+}
+
+#[cfg(feature = "reqwest")]
+impl Drop for TemporaryArtifact {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+#[cfg(feature = "reqwest")]
+async fn fetch_and_verify_package_artifact_streaming(
+    url: &str,
+    trust: &TrustInfo,
+    config: &PalaceConfig,
+) -> PalaceResult<ArtifactInfo> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to build HTTP client: {error}"),
+            )
+        })?;
+    let mut next_url = Url::parse(url)
+        .map_err(|_| PalaceError::new(PalaceErrorCode::BadRequest, "invalid artifact URL"))?;
+    let temporary = TemporaryArtifact {
+        path: std::env::temp_dir().join(format!(
+            "k-o-palace-artifact-{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        )),
+    };
+
+    let mut redirect_count = 0u32;
+    let (content_type, size, hash) = loop {
+        validate_artifact_destination(&next_url, config).await?;
+        let response = client.get(next_url.clone()).send().await.map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to fetch artifact: {error}"),
+            )
+        })?;
+
+        if response.status().is_redirection() {
+            let location = response
+                .headers()
+                .get(reqwest::header::LOCATION)
+                .ok_or_else(|| {
+                    PalaceError::new(
+                        PalaceErrorCode::BadRequest,
+                        "artifact redirect is missing a location",
+                    )
+                })?
+                .to_str()
+                .map_err(|_| {
+                    PalaceError::new(
+                        PalaceErrorCode::BadRequest,
+                        "artifact redirect location is invalid",
+                    )
+                })?;
+            if redirect_count >= config.registry.max_redirects {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::BadRequest,
+                    "artifact redirect limit exceeded",
+                ));
+            }
+            redirect_count += 1;
+            next_url = next_url.join(location).map_err(|_| {
+                PalaceError::new(
+                    PalaceErrorCode::BadRequest,
+                    "artifact redirect location is invalid",
+                )
+            })?;
+            continue;
+        }
+
+        if !response.status().is_success() {
+            return Err(PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("artifact fetch failed: HTTP {}", response.status()),
+            ));
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(ToOwned::to_owned);
+        validate_content_type(content_type.as_deref())?;
+        if response
+            .content_length()
+            .is_some_and(|value| value > config.storage.max_artifact_size_bytes as u64)
+        {
+            return Err(PalaceError::new(
+                PalaceErrorCode::TooLarge,
+                "artifact exceeds the configured maximum size",
+            ));
+        }
+
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary.path)
+            .await
+            .map_err(|error| {
+                PalaceError::new(
+                    PalaceErrorCode::StorageError,
+                    format!("failed to create temporary artifact: {error}"),
+                )
+            })?;
+        let mut hasher = Sha256::new();
+        let mut size = 0usize;
+        let mut response = response;
+        while let Some(chunk) = response.chunk().await.map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to read artifact bytes: {error}"),
+            )
+        })? {
+            if size.saturating_add(chunk.len()) > config.storage.max_artifact_size_bytes {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::TooLarge,
+                    "artifact exceeds the configured maximum size",
+                ));
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk).await.map_err(|error| {
+                PalaceError::new(
+                    PalaceErrorCode::StorageError,
+                    format!("failed to write temporary artifact: {error}"),
+                )
+            })?;
+            size += chunk.len();
+        }
+        file.flush().await.map_err(|error| {
+            PalaceError::new(
+                PalaceErrorCode::StorageError,
+                format!("failed to flush temporary artifact: {error}"),
+            )
+        })?;
+        break (content_type, size, hex::encode(hasher.finalize()));
+    };
+
+    let expected = trust
+        .content_hash
+        .as_deref()
+        .and_then(|value| value.strip_prefix("sha256:"))
+        .ok_or_else(|| {
+            PalaceError::new(
+                PalaceErrorCode::HashMismatch,
+                "missing or invalid content_hash",
+            )
+        })?;
+    if hash != expected {
+        return Err(PalaceError::new(
+            PalaceErrorCode::HashMismatch,
+            "artifact content hash does not match expected hash",
+        ));
+    }
+
+    match (&trust.signature, &trust.public_key) {
+        (None, None) => {}
+        (Some(_), Some(_)) => {
+            if size > config.storage.max_signed_artifact_size_bytes {
+                return Err(PalaceError::new(
+                    PalaceErrorCode::TooLarge,
+                    "signed artifact exceeds the configured in-memory verification limit",
+                ));
+            }
+            let content = tokio::fs::read(&temporary.path).await.map_err(|error| {
+                PalaceError::new(
+                    PalaceErrorCode::StorageError,
+                    format!("failed to read temporary artifact: {error}"),
+                )
+            })?;
+            crate::trust::verify_signature(trust, &content)?;
+        }
+        _ => {
+            return Err(PalaceError::new(
+                PalaceErrorCode::SignatureInvalid,
+                "signature and public_key must be provided together",
+            ));
+        }
+    }
+
+    Ok(ArtifactInfo {
+        content_type,
+        size,
+        hash,
+    })
+}
 /// Fetch artifact content (stub when reqwest is not enabled).
 #[cfg(not(feature = "reqwest"))]
 pub async fn fetch_with_redirect_limit(_url: &str, _max_redirects: u32) -> PalaceResult<Vec<u8>> {
@@ -335,8 +531,7 @@ pub async fn fetch_and_verify_package_artifact(
     trust: &TrustInfo,
     config: &PalaceConfig,
 ) -> PalaceResult<ArtifactInfo> {
-    let artifact = fetch_artifact(url, config).await?;
-    verify_artifact_content(&artifact.content, artifact.content_type, trust)
+    fetch_and_verify_package_artifact_streaming(url, trust, config).await
 }
 
 /// Fetch-and-verify stub when HTTP fetching is not enabled.

@@ -33,6 +33,7 @@ pub struct StorageConfig {
     pub github_release_api_url: Option<String>,
     pub allowed_hosts: Vec<String>,
     pub max_artifact_size_bytes: usize,
+    pub max_signed_artifact_size_bytes: usize,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -91,6 +92,7 @@ impl Default for PalaceConfig {
                 github_release_api_url: None,
                 allowed_hosts: vec![],
                 max_artifact_size_bytes: 512 * 1024 * 1024,
+                max_signed_artifact_size_bytes: 64 * 1024 * 1024,
             },
             security: SecurityConfig {
                 cors_origins: vec![],
@@ -173,6 +175,12 @@ impl PalaceConfig {
         if let Ok(size) = std::env::var("PALACE_MAX_ARTIFACT_SIZE_BYTES") {
             if let Ok(value) = size.parse() {
                 cfg.storage.max_artifact_size_bytes = value;
+            }
+
+            if let Ok(size) = std::env::var("PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES") {
+                if let Ok(value) = size.parse() {
+                    cfg.storage.max_signed_artifact_size_bytes = value;
+                }
             }
         }
         if let Ok(size) = std::env::var("PALACE_MAX_BODY_BYTES") {

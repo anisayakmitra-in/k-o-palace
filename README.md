@@ -11,7 +11,7 @@ K-O Palace is a runtime-agnostic AI package registry that implements the KUBER m
 - **Authentication** with hashed API tokens, publisher ownership, and role-based access (publisher, maintainer, moderator, administrator)
 - **Trust levels** with explicit server-enforced transitions (Experimental → Community → Verified → Official → Enterprise → Certified)
 - **Ed25519 signature verification** and SHA-256 content-hash verification
-- **Artifact storage** with local filesystem and GitHub Release backends, HTTPS enforcement, host allowlist, redirect limits, and checksum verification
+- **Artifact delivery** from local filesystem and GitHub Release sources, with HTTPS enforcement, host allowlists, bounded streaming to temporary files, redirect limits, and checksum verification
 - **Pagination** with bounded limits and accurate total counts
 - **Search** with ranked relevance scoring
 - **Structured errors** with stable error codes
@@ -164,7 +164,7 @@ Artifacts must be served over HTTPS from an allowlisted host. Default allowed ho
 - `github.com`
 - `objects.githubusercontent.com`
 
-Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND`, `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, and `PALACE_TRUST_PROXY_HEADERS`. Forwarded headers must only be enabled behind a proxy that overwrites them.
+Configure additional hosts via `PALACE_ALLOWED_HOSTS` environment variable. Other deployment settings include `PALACE_STORAGE_BACKEND`, `PALACE_STORAGE_LOCAL_PATH`, `PALACE_MAX_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_SIGNED_ARTIFACT_SIZE_BYTES`, `PALACE_MAX_BODY_BYTES`, `PALACE_REQUEST_TIMEOUT_SECS`, and `PALACE_TRUST_PROXY_HEADERS`. Forwarded headers must only be enabled behind a proxy that overwrites them.
 
 API tokens can request `packages:read`, `packages:publish`, `packages:write`, `tokens:manage`, `moderation:write`, or `admin:write` scopes and may include an `expires_at` timestamp. New tokens are addressable by their token ID; older tokens continue through the compatibility verifier.
 
