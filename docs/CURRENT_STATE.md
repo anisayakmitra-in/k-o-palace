@@ -48,7 +48,7 @@ The current migrations and adapter persist package ownership and trust state, an
 
 - Dependency constraints, resolution, lockfiles, compatibility decisions, runtime adapters, source-forge provenance, and package transfer/tombstone policy are incomplete or absent from the running API.
 - The package identity validator accepts flat IDs and does not normalize published IDs through the namespace model in `src/identity.rs`.
-- There is no OpenAPI document or published API compatibility policy.
+- `docs/API_CONTRACT.md` publishes the current route, authentication, error, and deployment contract. A machine-generated OpenAPI document is still a follow-up.
 
 ## Verified Commands
 
